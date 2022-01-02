@@ -34,10 +34,15 @@ void slotmap_init(struct slotmap *map, u32 size)
         map->slots[size - 1] = _slotmap_index_to_key(size - 1);
     }
 }
-void slotmap_free(struct slotmap *map)
+void slotmap_destroy(struct slotmap *map)
 {
     free(map->data);
     free(map->slots);
+
+    map->size      = 0;
+    map->capacity  = 0;
+    map->free_head = 0;
+    map->free_tail = 0;
 }
 
 u32 slotmap_insert(struct slotmap *map, void *value)

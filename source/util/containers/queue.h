@@ -29,7 +29,7 @@ void queue_init(struct queue *queue)
     pthread_spin_init(&queue->head_lock, PTHREAD_PROCESS_PRIVATE);
     pthread_spin_init(&queue->tail_lock, PTHREAD_PROCESS_PRIVATE);
 }
-void queue_free(struct queue *queue)
+void queue_destroy(struct queue *queue)
 {
     struct queue_node *node = queue->head;
     while (node)

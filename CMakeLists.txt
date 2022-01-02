@@ -22,6 +22,7 @@ set(SOURCE_FILES
     source/main.c
     
     source/network/socket.c
+    source/network/network_manager.c
 
     source/util/containers/slotmap.c
 )
