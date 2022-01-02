@@ -41,15 +41,22 @@ i32 socket_listen(socket_t socket, i32 port)
 {
     // Set non-blocking
     const int old_flags = fcntl(socket, F_GETFL, 0);
-    if (old_flags == -1)
+    if (old_flags < 0)
     {
         perror("socket_listen: fcntl() failed");
         return SOCKET_ERROR;
     }
     const int new_flags = fcntl(socket, F_SETFL, old_flags | O_NONBLOCK);
-    if (new_flags == -1)
+    if (new_flags < 0)
     {
         perror("socket_listen: fcntl() failed");
+        return SOCKET_ERROR;
+    }
+
+    // prevents 'socket_listen: bind() failed: Address already in use'
+    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &(int) { 1 }, sizeof(int)) < 0)
+    {
+        perror("socket_listen: setsockopt() failed");
         return SOCKET_ERROR;
     }
 
@@ -64,7 +71,7 @@ i32 socket_listen(socket_t socket, i32 port)
 
     if (bind(socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
     {
-        printf("socket_listen: bind() failed.\n");
+        perror("socket_listen: bind() failed");
         return SOCKET_ERROR;
     }
 

@@ -20,11 +20,16 @@ endif()
 
 set(SOURCE_FILES
     source/main.c
+
+    source/server/server.c
     
     source/network/socket.c
+    source/network/varints.c
     source/network/network_manager.c
 
     source/util/containers/slotmap.c
+    source/util/containers/queue.c
+    source/util/containers/buffer.c
 )
 
 add_executable(main-executable ${SOURCE_FILES})
