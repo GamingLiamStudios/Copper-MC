@@ -2,6 +2,7 @@
 #include "util/types.h"
 
 #include "network/socket.h"
+#include "util/containers/queue.h"
 
 int main(int argv, char **argc)
 {
@@ -15,11 +16,11 @@ int main(int argv, char **argc)
 
     while (1)
     {
-        socket_t client = accept(socket, NULL, NULL);
+        socket_t client = socket_accept(socket);
         if (client == SOCKET_ERROR) return -1;
 
         char buffer[1024];
-        i32  bytes = recv(client, buffer, 1024, 0);
+        i32  bytes = socket_recv(client, buffer, 1024);
         if (bytes == SOCKET_ERROR) return -1;
 
         printf("Received %d bytes: %s\n", bytes, buffer);

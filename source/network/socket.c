@@ -14,9 +14,7 @@
 inline socket_t socket_create()
 {
     socket_t sock = socket(AF_INET, SOCK_STREAM, 0);
-#ifdef PLATFORM_UNIX
     if (sock < 0)
-#endif
     {
         printf("socket_create: socket() failed.\n");
         return SOCKET_ERROR;
@@ -59,5 +57,5 @@ i32 socket_listen(socket_t socket, i32 port)
         return SOCKET_ERROR;
     }
 
-    return SOCKET_NO_CONN;
+    return 1;
 }

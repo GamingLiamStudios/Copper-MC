@@ -11,10 +11,19 @@ option(BUILD_SHARED_LIBS "" off)
 
 # add_subdirectory(extern)
 
+set(THREADS_PREFER_PTHREAD_FLAG on)
+find_package(Threads REQUIRED)
+
+if(NOT CMAKE_USE_PTHREADS_INIT)
+    message(FATAL_ERROR "Copper-MC requires pthreads")
+endif()
+
 set(SOURCE_FILES
     source/main.c
     
     source/network/socket.c
+
+    source/util/containers/slotmap.c
 )
 
 add_executable(main-executable ${SOURCE_FILES})
@@ -25,4 +34,4 @@ set_target_properties(main-executable PROPERTIES OUTPUT_NAME "Copper-MC")
 target_include_directories(main-executable PUBLIC "extern")
 target_include_directories(main-executable PRIVATE "source") # to allow paths relative to project root
 
-target_link_libraries(main-executable PRIVATE m)
+target_link_libraries(main-executable PRIVATE m Threads::Threads)
