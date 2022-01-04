@@ -31,7 +31,6 @@ inline void socket_destroy(socket_t socket)
 #ifdef PLATFORM_UNIX
         close(socket);
 #endif
-    socket = 0;
 }
 
 i32 socket_connect(socket_t *socket, const char *host, i32 port)

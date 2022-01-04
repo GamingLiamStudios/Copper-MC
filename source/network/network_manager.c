@@ -6,6 +6,13 @@
 #include <string.h>
 #include <errno.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <unistd.h>
+
+#include <zlib-ng.h>
+#include <openssl/md5.h>
+
 #include "server/server.h"
 #include "util/containers/slotmap.h"
 #include "util/containers/buffer.h"
@@ -16,12 +23,16 @@
 #define MAX_PLAYERS 20
 #define PORT        25565
 
+#define COMPRESSION_THRESHOLD 256
+
 struct network_manager
 {
     socket_t       *socket;
     struct slotmap *clients;
     struct queue   *packet_queue;
-    struct buffer  *packet_buffer;
+
+    struct buffer *packet_buffer;
+    struct buffer *compression_buffer;
 };
 
 struct network_client
@@ -41,14 +52,19 @@ struct network_client
     } params;
 };
 
+// These are 'signals'. They are used to modify the state of the client.
 enum
 {
-    CLIENTSIGNAL_DISCONNECT
+    CLIENTSIGNAL_DISCONNECT,
+    CLIENTSIGNAL_ENABLE_COMPRESSION,
+    CLIENTSIGNAL_ENABLE_ENCRYPTION,
+    CLIENTSIGNAL_SWITCH_STATE
 };
 
 void _network_manager_disconnect(
   struct slotmap *clients,
   struct buffer  *packet_buffer,
+  struct buffer  *compression_buffer,
   i32             client_id)
 {
     struct network_client *client = slotmap_get(clients, client_id);
@@ -77,20 +93,70 @@ void _network_manager_disconnect(
                 memcpy(buffer, packet_buffer->data, string_length + varint_size(string_length));
             }
 
+            i32 index              = 0;
             i32 packet_buffer_size = 1 + string_length + varint_size(string_length);
-            buffer_clear(packet_buffer);
-            buffer_reserve(packet_buffer, packet_buffer_size + varint_size(packet_buffer_size));
-            varint_encode(packet_buffer->data, packet_buffer_size);              // Packet Length
-            packet_buffer->data[varint_size(packet_buffer_size)] = packet_id;    // Packet ID
-            memcpy(                                                              // Packet Data
-              packet_buffer->data + varint_size(packet_buffer_size) + 1,
-              buffer,
-              packet_buffer_size - 1);
+            if (client->params & CLIENTPARAMS_COMPRESSED)
+            {
+                // First, let's get a buffer of the data to compress
+                buffer_clear(packet_buffer);
+                buffer_append_u8(packet_buffer, packet_id);
+                buffer_append(packet_buffer, buffer, packet_buffer_size - 1);
 
-            i32 ret = socket_send(
-              client->socket,
-              packet_buffer->data,
-              packet_buffer_size + varint_size(packet_buffer_size));
+                size_t data_length = 0;
+                buffer_clear(compression_buffer);
+                if (packet_buffer_size >= COMPRESSION_THRESHOLD)
+                {
+                    // Compress the packet
+                    buffer_reserve(compression_buffer, zng_compressBound(packet_buffer->size));
+
+                    data_length = compression_buffer->capacity;
+                    i32 ret     = zng_compress(
+                      compression_buffer->data,
+                      &data_length,
+                      packet_buffer->data,
+                      packet_buffer->size);
+                    if (ret != Z_OK)    // bruh
+                    {
+                        printf("Error compressing packet: %d\n", ret);
+                        pthread_exit(NULL);
+                    }
+
+                    compression_buffer->size = data_length;
+                    data_length              = packet_buffer->size;
+                }
+                else
+                    // Don't compress the packet
+                    buffer_append(compression_buffer, packet_buffer->data, packet_buffer->size);
+
+                // Now, let's write the packet to the client
+                buffer_clear(packet_buffer);
+                varint_encode(
+                  packet_buffer->data,
+                  varint_size(data_length) + compression_buffer->size);    // Packet Length
+                index += varint_size(varint_size(data_length) + data_length);
+                buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
+                varint_encode(packet_buffer->data + index, data_length);    // Data Length
+                index += varint_size(data_length);
+                memcpy(    // Compressed Data(Packet ID + Data)
+                  packet_buffer->data + index,
+                  compression_buffer->data,
+                  compression_buffer->size);
+                packet_buffer->size = index + compression_buffer->size;
+            }
+            else
+            {
+                buffer_clear(packet_buffer);
+                buffer_reserve(packet_buffer, packet_buffer_size + varint_size(packet_buffer_size));
+                varint_encode(packet_buffer->data, packet_buffer_size);    // Packet Length
+                packet_buffer->data[varint_size(packet_buffer_size)] = packet_id;    // Packet ID
+                memcpy(                                                              // Packet Data
+                  packet_buffer->data + varint_size(packet_buffer_size) + 1,
+                  buffer,
+                  packet_buffer_size - 1);
+                packet_buffer->size = packet_buffer_size + varint_size(packet_buffer_size);
+            }
+
+            i32 ret = socket_send(client->socket, packet_buffer->data, packet_buffer->size);
             if (ret == SOCKET_ERROR) pthread_exit(NULL);    // ...what
 
             printf("Client %d disconnected!\n", client_id);
@@ -108,11 +174,18 @@ void _network_manager_cleanup(void *args)
 {
     struct network_manager *manager = args;
 
-    // TODO: Send disconnect signal
+    const char *disconnect_message = "{\"text\":\"Server shutting down\"}";
+    buffer_clear(manager->packet_buffer);
+    buffer_append_u8(manager->packet_buffer, strlen(disconnect_message));
+    buffer_append(manager->packet_buffer, disconnect_message, strlen(disconnect_message));
     for (const struct slotmap_entry *itt = slotmap_end(manager->clients) - 1;
          itt >= slotmap_begin(manager->clients);
          itt--)
-        _network_manager_disconnect(manager->clients, manager->packet_buffer, itt->key);
+        _network_manager_disconnect(
+          manager->clients,
+          manager->packet_buffer,
+          manager->compression_buffer,
+          itt->key);
 
     slotmap_destroy(manager->clients);
     socket_destroy(*manager->socket);
@@ -122,6 +195,7 @@ void _network_manager_cleanup(void *args)
     queue_destroy(manager->packet_queue);
 
     buffer_destroy(manager->packet_buffer);
+    buffer_destroy(manager->compression_buffer);
 
     free(manager->clients);
     free(manager->socket);
@@ -224,6 +298,121 @@ void _network_manager_process_packets(
             }
             break;
         }
+        case CLIENTSTATE_LOGIN:
+        {
+            switch (packet->packet_id)
+            {
+            case 0x00:
+            {
+                // Login Start
+                i32   username_length = varint_decode(packet->data);
+                char *username        = malloc(username_length + 1);
+                memcpy(username, packet->data + varint_size(username_length), username_length);
+                username[username_length] = '\0';
+
+                printf("Client %d logged in as %s\n", packet->client_id, username);
+
+                // Check if Local host
+                struct sockaddr_in rem_addr, loc_addr;
+                u32                len = sizeof(rem_addr);
+
+                getpeername(client_data->socket, (struct sockaddr *) &rem_addr, &len);
+                getsockname(client_data->socket, (struct sockaddr *) &loc_addr, &len);
+                if (rem_addr.sin_addr.s_addr == loc_addr.sin_addr.s_addr)
+                {
+                    // Local host
+                    printf("Client %d is localhost\n", packet->client_id);
+
+                    // Generate Player UUID
+                    const char *UUID_hash_format = "OfflinePlayer:";
+                    u8 *UUID_hash_string = malloc(strlen(UUID_hash_format) + strlen(username));
+                    memcpy(UUID_hash_string, UUID_hash_format, strlen(UUID_hash_format));
+                    memcpy(UUID_hash_string + strlen(UUID_hash_format), username, strlen(username));
+
+                    char *UUID = malloc(MD5_DIGEST_LENGTH);
+                    MD5(UUID_hash_string, strlen(UUID_hash_format) + strlen(username), (u8 *) UUID);
+                    UUID[6] = (UUID[6] & 0x0f) | 0x30;
+
+                    // Set Compression Packet
+                    struct packet *client_packet = malloc(sizeof(struct packet));
+                    client_packet->client_id     = packet->client_id;
+                    client_packet->packet_id     = 0x03;
+                    client_packet->size          = varint_size(COMPRESSION_THRESHOLD);
+                    client_packet->data          = malloc(client_packet->size);
+                    varint_encode(client_packet->data, COMPRESSION_THRESHOLD);
+                    queue_push(clientbound_packets, client_packet);
+
+                    // Update Client Parameters
+                    client_packet            = malloc(sizeof(struct packet));
+                    client_packet->client_id = packet->client_id;
+                    client_packet->packet_id = -1;    // Signal Packet
+                    client_packet->size      = 1;
+                    client_packet->data      = malloc(client_packet->size);
+                    client_packet->data[0]   = CLIENTSIGNAL_ENABLE_COMPRESSION;
+                    queue_push(clientbound_packets, client_packet);
+
+                    // Send Login Success
+                    client_packet            = malloc(sizeof(struct packet));
+                    client_packet->client_id = packet->client_id;
+                    client_packet->packet_id = 0x02;
+                    client_packet->size =
+                      varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
+                    client_packet->data = malloc(client_packet->size);
+
+                    varint_encode(client_packet->data, 36);
+                    char *fUUID_string = malloc(37);
+                    snprintf(
+                      fUUID_string,
+                      37,
+                      "%02hhx%02hhx%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx"
+                      "%02hhx%02hhx%02hhx%02hhx%02hhx",
+                      UUID[0],
+                      UUID[1],
+                      UUID[2],
+                      UUID[3],
+                      UUID[4],
+                      UUID[5],
+                      UUID[6],
+                      UUID[7],
+                      UUID[8],
+                      UUID[9],
+                      UUID[10],
+                      UUID[11],
+                      UUID[12],
+                      UUID[13],
+                      UUID[14],
+                      UUID[15]);
+                    memcpy(client_packet->data + 1, fUUID_string, 36);
+                    memcpy(
+                      client_packet->data + 37,
+                      packet->data,
+                      packet->size);    // Save some work by reusing the Login Start packet
+                    free(fUUID_string);
+
+                    queue_push(clientbound_packets, client_packet);
+
+                    // Update Client State
+                    client_packet            = malloc(sizeof(struct packet));
+                    client_packet->client_id = packet->client_id;
+                    client_packet->packet_id = -1;    // Signal Packet
+                    client_packet->size      = 2;
+                    client_packet->data      = malloc(client_packet->size);
+                    client_packet->data[0]   = CLIENTSIGNAL_SWITCH_STATE;
+                    client_packet->data[1]   = CLIENTSTATE_PLAY;
+                    queue_push(clientbound_packets, client_packet);
+                }
+                else
+                {
+                    // Remote host
+                    printf("Client %d is remotehost\n", packet->client_id);
+                }
+            }
+            break;
+            case 0x01:
+            default: printf("Unknown Packet! ID: %2X\n", packet->packet_id); pthread_exit(NULL);
+            }
+        }
+        break;
         default: printf("Unknown Client State! %d\n", client_data->state); pthread_exit(NULL);
         }
     }
@@ -239,7 +428,9 @@ void *network_manager_thread(void *args)
     socket_t               *socket;
     struct slotmap         *clients;
     struct queue           *packet_queue;
-    struct buffer          *packet_buffer;
+
+    struct buffer *packet_buffer;
+    struct buffer *compression_buffer;
 
     socket  = malloc(sizeof(socket_t));
     *socket = socket_create();
@@ -265,10 +456,15 @@ void *network_manager_thread(void *args)
 
     packet_buffer = malloc(sizeof(struct buffer));
     buffer_init(packet_buffer, 4096);
-    netmgr->packet_buffer = packet_buffer;
+    compression_buffer = malloc(sizeof(struct buffer));
+    buffer_init(compression_buffer, 4096);
+
+    netmgr->packet_buffer      = packet_buffer;
+    netmgr->compression_buffer = compression_buffer;
 
     while (true)
     {
+        // FIXME: Figure out what's causing the invalid sockets after the first connection
         // First, let's accept new connections
         socket_t client;
         while (true)
@@ -281,6 +477,7 @@ void *network_manager_thread(void *args)
             struct network_client *client_data = malloc(sizeof(struct network_client));
             client_data->socket                = client;
             client_data->state                 = CLIENTSTATE_HANDSHAKE;
+            client_data->params                = 0;
             slotmap_insert(clients, client_data);
         }
 
@@ -294,12 +491,6 @@ void *network_manager_thread(void *args)
             if (client_data->params & CLIENTPARAMS_ENCRYPTED)
             {
                 printf("Encrypted packets? These aren't supported!\n");
-                pthread_exit(NULL);
-            }
-
-            if (client_data->params & CLIENTPARAMS_COMPRESSED)
-            {
-                printf("Compressed packets? These aren't supported!\n");
                 pthread_exit(NULL);
             }
 
@@ -341,14 +532,71 @@ void *network_manager_thread(void *args)
                 struct packet *packet = malloc(sizeof(struct packet));
                 packet->client_id     = itt->key;
 
-                // Since there aren't more than 127 packets, we can just read a byte
-                packet->packet_id = packet_buffer->data[index++];
-
-                packet->size = packet_length - 1;
-                if (packet->size > 0)
+                if (client_data->params & CLIENTPARAMS_COMPRESSED)
                 {
-                    packet->data = malloc(sizeof(u8) * packet->size);
-                    memcpy(packet->data, packet_buffer->data + index, packet->size);
+                    i32 data_length = varint_decode(packet_buffer->data + index);
+                    index += varint_size(data_length);
+                    if (data_length == 0)
+                    {
+                        // Uncompressed packet
+                        packet->packet_id = packet_buffer->data[index++];
+                        packet->size      = packet_length - varint_size(data_length) - 1;
+                        if (packet->size > 0)
+                        {
+                            packet->data = malloc(packet->size);
+                            memcpy(packet->data, packet_buffer->data + index, packet->size);
+                        }
+                        else
+                            packet->data = NULL;
+                    }
+                    else
+                    {
+                        // Compressed packet
+                        buffer_clear(compression_buffer);
+                        buffer_reserve(compression_buffer, data_length);
+                        size_t uncompressed_size = compression_buffer->capacity;
+                        i32    ret               = zng_uncompress(
+                          compression_buffer->data,
+                          &uncompressed_size,
+                          packet_buffer->data + index,
+                          packet_length - varint_size(data_length) - 1);
+                        if (ret != Z_OK)
+                        {
+                            printf(
+                              "Error %d: Failed to uncompress packet! Disconnect client %d\n",
+                              ret,
+                              packet->client_id);
+
+                            buffer_clear(packet_buffer);
+                            buffer_append(packet_buffer, "Decompression failed.", 19);
+                            _network_manager_disconnect(
+                              clients,
+                              packet_buffer,
+                              compression_buffer,
+                              packet->client_id);
+
+                            break;
+                        }
+
+                        packet->packet_id = compression_buffer->data[0];
+                        packet->size      = uncompressed_size - 1;
+                        packet->data      = malloc(packet->size);
+                        memcpy(packet->data, compression_buffer->data + 1, packet->size);
+                    }
+                }
+                else
+                {
+                    // Since there aren't more than 127 packets, we can just read a byte
+                    packet->packet_id = packet_buffer->data[index++];
+
+                    packet->size = packet_length - 1;
+                    if (packet->size > 0)
+                    {
+                        packet->data = malloc(sizeof(u8) * packet->size);
+                        memcpy(packet->data, packet_buffer->data + index, packet->size);
+                    }
+                    else
+                        packet->data = NULL;
                 }
 
                 queue_push(packet_queue, packet);
@@ -384,11 +632,20 @@ void *network_manager_thread(void *args)
                 switch (packet->data[0])
                 {
                 case CLIENTSIGNAL_DISCONNECT:
-                {
                     buffer_append(packet_buffer, packet->data, packet->size);
-                    _network_manager_disconnect(clients, packet_buffer, packet->client_id);
-                }
-                break;
+                    _network_manager_disconnect(
+                      clients,
+                      packet_buffer,
+                      compression_buffer,
+                      packet->client_id);
+                    break;
+                case CLIENTSIGNAL_ENABLE_COMPRESSION:
+                    client->params |= CLIENTPARAMS_COMPRESSED;
+                    break;
+                case CLIENTSIGNAL_ENABLE_ENCRYPTION:
+                    client->params |= CLIENTPARAMS_ENCRYPTED;
+                    break;
+                case CLIENTSIGNAL_SWITCH_STATE: client->state = packet->data[1]; break;
                 default: printf("Client %d sent an unknown signal!\n", packet->client_id);
                 }
                 free(packet->data);
@@ -397,13 +654,84 @@ void *network_manager_thread(void *args)
             }
 
             i32 index = 0;
-            varint_encode(packet_buffer->data, packet->size + 1);    // Packet Length
-            index += varint_size(packet->size + 1);
-            buffer_reserve(packet_buffer, index + 1 + packet->size);
-            packet_buffer->data[index++] = packet->packet_id;                   // Packet ID
-            memcpy(packet_buffer->data + index, packet->data, packet->size);    // Packet Data
+            if (client->params & CLIENTPARAMS_COMPRESSED)
+            {
+                // First, let's get a buffer of the data to compress
+                buffer_append_u8(packet_buffer, packet->packet_id);
+                buffer_append(packet_buffer, packet->data, packet->size);
 
-            i32 ret = socket_send(client_socket, packet_buffer->data, index + packet->size);
+                size_t data_length = 0;
+                buffer_clear(compression_buffer);
+                if ((packet->size + 1) >= COMPRESSION_THRESHOLD)
+                {
+                    // Compress the packet
+                    buffer_reserve(compression_buffer, zng_compressBound(packet_buffer->size));
+
+                    data_length = compression_buffer->capacity;
+                    i32 ret     = zng_compress(
+                      compression_buffer->data,
+                      &data_length,
+                      packet_buffer->data,
+                      packet_buffer->size);
+                    if (ret != Z_OK)
+                    {
+                        printf(
+                          "Error %d: Failed to compress packet! Disconnect client %d\n",
+                          ret,
+                          packet->client_id);
+
+                        buffer_clear(packet_buffer);
+                        buffer_append(packet_buffer, "Compression failed.", 19);
+                        _network_manager_disconnect(
+                          clients,
+                          packet_buffer,
+                          compression_buffer,
+                          packet->client_id);
+
+                        free(packet->data);
+                        free(packet);
+                        continue;
+                    }
+
+                    compression_buffer->size = data_length;
+                    data_length              = packet_buffer->size;
+                }
+                else
+                    // Don't compress the packet
+                    buffer_append(compression_buffer, packet_buffer->data, packet_buffer->size);
+
+                // Now, let's write the packet to the client
+                buffer_clear(packet_buffer);
+                varint_encode(
+                  packet_buffer->data,
+                  varint_size(data_length) + compression_buffer->size);    // Packet Length
+                index += varint_size(varint_size(data_length) + data_length);
+                buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
+                varint_encode(packet_buffer->data + index, data_length);    // Data Length
+                index += varint_size(data_length);
+                memcpy(    // Compressed Data(Packet ID + Data)
+                  packet_buffer->data + index,
+                  compression_buffer->data,
+                  compression_buffer->size);
+                packet_buffer->size = index + compression_buffer->size;
+            }
+            else
+            {
+                varint_encode(packet_buffer->data, packet->size + 1);    // Packet Length
+                index += varint_size(packet->size + 1);
+                buffer_reserve(packet_buffer, index + 1 + packet->size);
+                packet_buffer->data[index++] = packet->packet_id;                   // Packet ID
+                memcpy(packet_buffer->data + index, packet->data, packet->size);    // Packet Data
+                packet_buffer->size = index + packet->size;
+            }
+
+            if (client->params & CLIENTPARAMS_ENCRYPTED)
+            {
+                printf("Encrypted packets? These aren't supported!\n");
+                pthread_exit(NULL);
+            }
+
+            i32 ret = socket_send(client_socket, packet_buffer->data, packet_buffer->size);
             if (ret == SOCKET_ERROR) pthread_exit(NULL);
 
             free(packet->data);

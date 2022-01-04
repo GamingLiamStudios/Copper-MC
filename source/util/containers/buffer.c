@@ -31,6 +31,10 @@ inline void buffer_append(struct buffer *buffer, const void *data, u32 size)
     memcpy(buffer->data + buffer->size, data, size);
     buffer->size += size;
 }
+inline void buffer_append_u8(struct buffer *buffer, u8 data)
+{
+    buffer_append(buffer, &data, sizeof(u8));
+}
 
 inline i32 buffer_read_socket(struct buffer *buffer, socket_t socket, u32 size)
 {

@@ -20,4 +20,5 @@ void buffer_reserve(struct buffer *buffer, u32 capacity);
 #define buffer_capacity(buffer) ((buffer)->capacity)
 
 void buffer_append(struct buffer *buffer, const void *data, u32 size);
+void buffer_append_u8(struct buffer *buffer, u8 data);
 i32  buffer_read_socket(struct buffer *buffer, socket_t socket, u32 size);
