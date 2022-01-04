@@ -114,6 +114,7 @@ void _network_manager_process_packets(
         break;
         case CLIENTSTATE_STATUS:
         {
+            // TODO: Implement Legacy Server List Ping
             switch (packet->packet_id)
             {
             case 0x00:
