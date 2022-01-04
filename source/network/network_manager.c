@@ -41,6 +41,69 @@ struct network_client
     } params;
 };
 
+enum
+{
+    CLIENTSIGNAL_DISCONNECT
+};
+
+void _network_manager_disconnect(
+  struct slotmap *clients,
+  struct buffer  *packet_buffer,
+  i32             client_id)
+{
+    struct network_client *client = slotmap_get(clients, client_id);
+
+    i32 packet_id = -1;
+    switch (client->state)
+    {
+    case CLIENTSTATE_PLAY: packet_id = 0x40;
+    case CLIENTSTATE_LOGIN:
+        if (packet_id == -1) packet_id = 0x00;
+        {
+            u8 *buffer;
+            i32 string_length = varint_decode(packet_buffer->data);
+            if (string_length == 0)
+            {
+                const char *disconnect_message = "{\"text\":\"Server requested Disconnect\"}";
+                string_length                  = strlen(disconnect_message);
+
+                buffer = malloc(string_length + varint_size(string_length));
+                varint_encode(buffer, string_length);
+                memcpy(buffer + varint_size(string_length), disconnect_message, string_length);
+            }
+            else
+            {
+                buffer = malloc(string_length + varint_size(string_length));
+                memcpy(buffer, packet_buffer->data, string_length + varint_size(string_length));
+            }
+
+            i32 packet_buffer_size = 1 + string_length + varint_size(string_length);
+            buffer_clear(packet_buffer);
+            buffer_reserve(packet_buffer, packet_buffer_size + varint_size(packet_buffer_size));
+            varint_encode(packet_buffer->data, packet_buffer_size);              // Packet Length
+            packet_buffer->data[varint_size(packet_buffer_size)] = packet_id;    // Packet ID
+            memcpy(                                                              // Packet Data
+              packet_buffer->data + varint_size(packet_buffer_size) + 1,
+              buffer,
+              packet_buffer_size - 1);
+
+            i32 ret = socket_send(
+              client->socket,
+              packet_buffer->data,
+              packet_buffer_size + varint_size(packet_buffer_size));
+            if (ret == SOCKET_ERROR) pthread_exit(NULL);    // ...what
+
+            printf("Client %d disconnected!\n", client_id);
+        }
+        break;
+    default: break;
+    }
+
+    socket_destroy(client->socket);
+    free(slotmap_get(clients, client_id));
+    slotmap_remove(clients, client_id);
+}
+
 void _network_manager_cleanup(void *args)
 {
     struct network_manager *manager = args;
@@ -49,11 +112,7 @@ void _network_manager_cleanup(void *args)
     for (const struct slotmap_entry *itt = slotmap_end(manager->clients) - 1;
          itt >= slotmap_begin(manager->clients);
          itt--)
-    {
-        socket_destroy(((struct network_client *) itt->value)->socket);
-        free(itt->value);
-        slotmap_remove(manager->clients, itt->key);
-    }
+        _network_manager_disconnect(manager->clients, manager->packet_buffer, itt->key);
 
     slotmap_destroy(manager->clients);
     socket_destroy(*manager->socket);
@@ -143,16 +202,24 @@ void _network_manager_process_packets(
                   slotmap_size(clients));
 
                 queue_push(clientbound_packets, status_packet);
-                printf(
-                  "Sent status packet of length %d to client %d\n",
-                  status_packet->size,
-                  packet->client_id);
             }
             break;
             case 0x01:
+            {
                 // Status Ping
                 queue_push(clientbound_packets, packet);
-                break;
+
+                struct packet *disconnect_signal = malloc(sizeof(struct packet));
+                disconnect_signal->client_id     = packet->client_id;
+                disconnect_signal->packet_id     = -1;    // Signal Packet
+
+                disconnect_signal->size    = 1 + varint_size(0);
+                disconnect_signal->data    = malloc(disconnect_signal->size);
+                disconnect_signal->data[0] = CLIENTSIGNAL_DISCONNECT;
+                varint_encode(disconnect_signal->data + 1, 0);
+                queue_push(clientbound_packets, disconnect_signal);
+            }
+            break;
             default: printf("Unknown Packet! ID: %2X\n", packet->packet_id); pthread_exit(NULL);
             }
             break;
@@ -169,33 +236,34 @@ void *network_manager_thread(void *args)
     struct queue        *clientbound_packets = &packet_queues->clientbound;
 
     struct network_manager *netmgr;
-    socket_t                socket;
+    socket_t               *socket;
     struct slotmap         *clients;
     struct queue           *packet_queue;
     struct buffer          *packet_buffer;
 
-    socket = socket_create();
-    if (socket == SOCKET_ERROR) return NULL;
-    if (socket_listen(socket, PORT) == SOCKET_ERROR)
+    socket  = malloc(sizeof(socket_t));
+    *socket = socket_create();
+    if (*socket == SOCKET_ERROR) return NULL;
+    if (socket_listen(*socket, PORT) == SOCKET_ERROR)
     {
-        socket_destroy(socket);
+        socket_destroy(*socket);
+        free(socket);
         return NULL;
     }
 
-    clients = (struct slotmap *) malloc(sizeof(struct slotmap));
+    clients = malloc(sizeof(struct slotmap));
     slotmap_init(clients, MAX_PLAYERS);
 
-    packet_queue = (struct queue *) malloc(sizeof(struct queue));
+    packet_queue = malloc(sizeof(struct queue));
     queue_init(packet_queue);
 
-    netmgr               = (struct network_manager *) malloc(sizeof(struct network_manager));
-    netmgr->socket       = (socket_t *) malloc(sizeof(socket_t));
-    *netmgr->socket      = socket;
+    netmgr               = malloc(sizeof(struct network_manager));
+    netmgr->socket       = socket;
     netmgr->clients      = clients;
     netmgr->packet_queue = packet_queue;
     pthread_cleanup_push(_network_manager_cleanup, netmgr);
 
-    packet_buffer = (struct buffer *) malloc(sizeof(struct buffer));
+    packet_buffer = malloc(sizeof(struct buffer));
     buffer_init(packet_buffer, 4096);
     netmgr->packet_buffer = packet_buffer;
 
@@ -205,15 +273,14 @@ void *network_manager_thread(void *args)
         socket_t client;
         while (true)
         {
-            client = socket_accept(socket);
+            client = socket_accept(*socket);
             if (client == SOCKET_ERROR) pthread_exit(NULL);
             if (client == SOCKET_NO_CONN) break;
 
             printf("Accepted new client!\n");
-            struct network_client *client_data =
-              (struct network_client *) malloc(sizeof(struct network_client));
-            client_data->socket = client;
-            client_data->state  = CLIENTSTATE_HANDSHAKE;
+            struct network_client *client_data = malloc(sizeof(struct network_client));
+            client_data->socket                = client;
+            client_data->state                 = CLIENTSTATE_HANDSHAKE;
             slotmap_insert(clients, client_data);
         }
 
@@ -271,7 +338,7 @@ void *network_manager_thread(void *args)
                     if (ret == SOCKET_NO_DATA) break;
                 }
 
-                struct packet *packet = (struct packet *) malloc(sizeof(struct packet));
+                struct packet *packet = malloc(sizeof(struct packet));
                 packet->client_id     = itt->key;
 
                 // Since there aren't more than 127 packets, we can just read a byte
@@ -280,7 +347,7 @@ void *network_manager_thread(void *args)
                 packet->size = packet_length - 1;
                 if (packet->size > 0)
                 {
-                    packet->data = (u8 *) malloc(sizeof(u8) * packet->size);
+                    packet->data = malloc(sizeof(u8) * packet->size);
                     memcpy(packet->data, packet_buffer->data + index, packet->size);
                 }
 
@@ -296,20 +363,40 @@ void *network_manager_thread(void *args)
         struct packet *packet;
         while ((packet = queue_pop(clientbound_packets)))
         {
-            printf("Sending packet to client %d\n", packet->client_id);
             struct network_client *client = slotmap_get(clients, packet->client_id);
+            if (client == NULL) continue;
 
             socket_t client_socket = client->socket;
             if (client_socket == SOCKET_ERROR)
             {
                 printf("Client %d is no longer connected!\n", packet->client_id);
+                socket_destroy(client_socket);
+                free(slotmap_get(clients, packet->client_id));
+                slotmap_remove(clients, packet->client_id);
+                free(packet->data);
+                free(packet);
+                continue;
+            }
+
+            buffer_clear(packet_buffer);
+            if (packet->packet_id == -1)    // Signal
+            {
+                switch (packet->data[0])
+                {
+                case CLIENTSIGNAL_DISCONNECT:
+                {
+                    buffer_append(packet_buffer, packet->data, packet->size);
+                    _network_manager_disconnect(clients, packet_buffer, packet->client_id);
+                }
+                break;
+                default: printf("Client %d sent an unknown signal!\n", packet->client_id);
+                }
                 free(packet->data);
                 free(packet);
                 continue;
             }
 
             i32 index = 0;
-            buffer_clear(packet_buffer);
             varint_encode(packet_buffer->data, packet->size + 1);    // Packet Length
             index += varint_size(packet->size + 1);
             buffer_reserve(packet_buffer, index + 1 + packet->size);

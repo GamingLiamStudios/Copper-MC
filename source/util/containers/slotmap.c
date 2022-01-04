@@ -21,8 +21,8 @@ inline u32 slotmap_get_array_index_from_key(u32 key)
 
 void slotmap_init(struct slotmap *map, u32 size)
 {
-    map->data      = (struct slotmap_entry *) malloc(sizeof(struct slotmap_entry) * size);
-    map->slots     = (u32 *) malloc(sizeof(u32) * size);
+    map->data      = malloc(sizeof(struct slotmap_entry) * size);
+    map->slots     = malloc(sizeof(u32) * size);
     map->size      = 0;
     map->capacity  = size;
     map->free_head = 0;

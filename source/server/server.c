@@ -18,14 +18,14 @@ void server_stop(int sig)
 {
     printf("Stopping Server\n");
 
+    pthread_cancel(network_thread);
+    pthread_join(network_thread, NULL);
+
     struct packet *packet;
     while ((packet = queue_pop(&packet_queue.clientbound))) free(packet);
     while ((packet = queue_pop(&packet_queue.serverbound))) free(packet);
     queue_destroy(&packet_queue.clientbound);
     queue_destroy(&packet_queue.serverbound);
-
-    pthread_cancel(network_thread);
-    pthread_join(network_thread, NULL);
 
     // TODO: Clean stop of server
     exit(0);
