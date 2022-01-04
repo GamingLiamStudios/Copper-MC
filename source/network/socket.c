@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -39,20 +40,6 @@ i32 socket_connect(socket_t *socket, const char *host, i32 port)
 
 i32 socket_listen(socket_t socket, i32 port)
 {
-    // Set non-blocking
-    const int old_flags = fcntl(socket, F_GETFL, 0);
-    if (old_flags < 0)
-    {
-        perror("socket_listen: fcntl() failed");
-        return SOCKET_ERROR;
-    }
-    const int new_flags = fcntl(socket, F_SETFL, old_flags | O_NONBLOCK);
-    if (new_flags < 0)
-    {
-        perror("socket_listen: fcntl() failed");
-        return SOCKET_ERROR;
-    }
-
     // prevents 'socket_listen: bind() failed: Address already in use'
     if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &(int) { 1 }, sizeof(int)) < 0)
     {
@@ -72,6 +59,28 @@ i32 socket_listen(socket_t socket, i32 port)
     if (bind(socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
     {
         perror("socket_listen: bind() failed");
+        return SOCKET_ERROR;
+    }
+
+    // Set non-blocking
+    const int old_flags = fcntl(socket, F_GETFL, 0);
+    if (old_flags < 0)
+    {
+        perror("socket_listen: fcntl() failed");
+        return SOCKET_ERROR;
+    }
+    const int new_flags = fcntl(socket, F_SETFL, old_flags | O_NONBLOCK);
+    if (new_flags < 0)
+    {
+        perror("socket_listen: fcntl() failed");
+        return SOCKET_ERROR;
+    }
+
+    // Enable TCP_NODELAY
+    int flag = 1;
+    if (setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int)) < 0)
+    {
+        perror("socket_accept: setsockopt() failed");
         return SOCKET_ERROR;
     }
 
@@ -99,6 +108,31 @@ socket_t socket_accept(socket_t socket)
         }
     }
 
+    // Set non-blocking
+    const int old_flags = fcntl(client, F_GETFL, 0);
+    if (old_flags < 0)
+    {
+        perror("socket_accept: fcntl() failed");
+        close(client);
+        return SOCKET_ERROR;
+    }
+    const int new_flags = fcntl(client, F_SETFL, old_flags | O_NONBLOCK);
+    if (new_flags < 0)
+    {
+        perror("socket_accept: fcntl() failed");
+        close(client);
+        return SOCKET_ERROR;
+    }
+
+    // Enable TCP_NODELAY
+    int flag = 1;
+    if (setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int)) < 0)
+    {
+        perror("socket_accept: setsockopt() failed");
+        close(client);
+        return SOCKET_ERROR;
+    }
+
     return client;
 }
 i32 socket_recv(socket_t socket, void *buffer, i32 buffer_size)
@@ -116,9 +150,53 @@ i32 socket_recv(socket_t socket, void *buffer, i32 buffer_size)
     }
     else if (bytes == 0)
     {
-        printf("socket_recv: Connection closed.\n");
-        return SOCKET_NO_CONN;
+        if (errno != EWOULDBLOCK)
+        {
+            printf("socket_recv: Connection closed.\n");
+            return SOCKET_NO_CONN;
+        }
+        else
+            return SOCKET_NO_DATA;
     }
+
+    return bytes;
+}
+
+i32 socket_send(socket_t socket, const void *buffer, i32 buffer_size)
+{
+    i32 bytes = send(socket, buffer, buffer_size, 0);
+    if (bytes < 0)
+    {
+        if (errno == EWOULDBLOCK)
+            return socket_send(socket, buffer, buffer_size);
+        else if (errno == EMSGSIZE)
+        {
+            while ((bytes = socket_send(socket, buffer, buffer_size / 2)) < 0)
+            {
+                if (errno != EWOULDBLOCK)
+                {
+                    perror("socket_send: send() failed");
+                    return SOCKET_ERROR;
+                }
+            }
+
+            while ((bytes = socket_send(socket, buffer + buffer_size / 2, buffer_size / 2)) < 0)
+            {
+                if (errno != EWOULDBLOCK)
+                {
+                    perror("socket_send: send() failed");
+                    return SOCKET_ERROR;
+                }
+            }
+        }
+        else
+        {
+            perror("socket_send: send() failed");
+            return SOCKET_ERROR;
+        }
+    }
+
+    if (bytes != buffer_size) bytes = socket_send(socket, buffer + bytes, buffer_size - bytes);
 
     return bytes;
 }

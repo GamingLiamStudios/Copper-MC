@@ -27,5 +27,4 @@ i32 socket_listen(socket_t socket, i32 port);
 
 socket_t socket_accept(socket_t socket);
 i32      socket_recv(socket_t socket, void *buffer, i32 buffer_size);
-
-#define socket_send(socket, data, size) send(socket, data, size, 0)
+i32      socket_send(socket_t socket, const void *buffer, i32 buffer_size);
