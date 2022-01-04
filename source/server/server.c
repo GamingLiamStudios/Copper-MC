@@ -7,14 +7,22 @@
 
 #define TPS 20
 
-// TODO: Make this not be a global variable
+// TODO: Make these not be global variables
 pthread_t network_thread;
 // pthread_t *world_threads;
 // pthread_t plugin_thread;
 
+struct packet_queue packet_queue;
+
 void server_stop(int sig)
 {
     printf("Stopping Server\n");
+
+    struct packet *packet;
+    while ((packet = queue_pop(&packet_queue.clientbound))) free(packet);
+    while ((packet = queue_pop(&packet_queue.serverbound))) free(packet);
+    queue_destroy(&packet_queue.clientbound);
+    queue_destroy(&packet_queue.serverbound);
 
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);
@@ -27,9 +35,8 @@ void server_run()
 {
     signal(SIGINT, server_stop);
 
-    struct packet_queue packet_queue;
-    struct queue       *serverbound_packets;
-    struct queue       *clientbound_packets;
+    struct queue *serverbound_packets;
+    struct queue *clientbound_packets;
 
     // Initialize the packet queue
     queue_init(&packet_queue.serverbound);

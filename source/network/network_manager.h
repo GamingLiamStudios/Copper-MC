@@ -22,5 +22,3 @@ struct packet
 };
 
 void *network_manager_thread(void *args);
-
-void packet_write(u32 client_id, u8 *data, u32 size);
