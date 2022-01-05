@@ -12,6 +12,8 @@
 
 #include <zlib-ng.h>
 #include <openssl/md5.h>
+#include <openssl/aes.h>
+#include <openssl/rsa.h>
 
 #include "server/server.h"
 #include "util/containers/slotmap.h"
@@ -61,6 +63,60 @@ enum
     CLIENTSIGNAL_SWITCH_STATE
 };
 
+i32 _network_manager_compress_packet(
+  struct buffer *packet_buffer,
+  struct buffer *compression_buffer,
+  struct packet *packet)
+{
+    i32 index = 0;
+    // First, let's get a buffer of the data to compress
+    buffer_append_u8(packet_buffer, packet->packet_id);
+    buffer_append(packet_buffer, packet->data, packet->size);
+
+    size_t data_length = 0;
+    buffer_clear(compression_buffer);
+    if ((packet->size + 1) >= COMPRESSION_THRESHOLD)
+    {
+        // Compress the packet
+        buffer_reserve(compression_buffer, zng_compressBound(packet_buffer->size));
+
+        data_length = compression_buffer->capacity;
+        i32 ret     = zng_compress(
+          compression_buffer->data,
+          &data_length,
+          packet_buffer->data,
+          packet_buffer->size);
+        if (ret != Z_OK)
+        {
+            printf("Error %d: Failed to compress packet!\n", ret);
+            return -1;
+        }
+
+        compression_buffer->size = data_length;
+        data_length              = packet_buffer->size;
+    }
+    else
+        // Don't compress the packet
+        buffer_append(compression_buffer, packet_buffer->data, packet_buffer->size);
+
+    // Now, let's write the packet to the client
+    buffer_clear(packet_buffer);
+    varint_encode(
+      packet_buffer->data,
+      varint_size(data_length) + compression_buffer->size);    // Packet Length
+    index += varint_size(varint_size(data_length) + data_length);
+    buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
+    varint_encode(packet_buffer->data + index, data_length);    // Data Length
+    index += varint_size(data_length);
+    memcpy(    // Compressed Data(Packet ID + Data)
+      packet_buffer->data + index,
+      compression_buffer->data,
+      compression_buffer->size);
+    packet_buffer->size = index + compression_buffer->size;
+
+    return 0;
+}
+
 void _network_manager_disconnect(
   struct slotmap *clients,
   struct buffer  *packet_buffer,
@@ -69,91 +125,56 @@ void _network_manager_disconnect(
 {
     struct network_client *client = slotmap_get(clients, client_id);
 
-    i32 packet_id = -1;
+    struct packet packet;
+    packet.packet_id = -1;
     switch (client->state)
     {
-    case CLIENTSTATE_PLAY: packet_id = 0x40;
+    case CLIENTSTATE_PLAY: packet.packet_id = 0x40;
     case CLIENTSTATE_LOGIN:
-        if (packet_id == -1) packet_id = 0x00;
+        if (packet.packet_id == -1) packet.packet_id = 0x00;
         {
-            u8 *buffer;
             i32 string_length = varint_decode(packet_buffer->data);
             if (string_length == 0)
             {
                 const char *disconnect_message = "{\"text\":\"Server requested Disconnect\"}";
                 string_length                  = strlen(disconnect_message);
 
-                buffer = malloc(string_length + varint_size(string_length));
-                varint_encode(buffer, string_length);
-                memcpy(buffer + varint_size(string_length), disconnect_message, string_length);
+                packet.size = string_length + varint_size(string_length);
+                packet.data = malloc(packet.size);
+                varint_encode(packet.data, string_length);
+                memcpy(packet.data + varint_size(string_length), disconnect_message, string_length);
             }
             else
             {
-                buffer = malloc(string_length + varint_size(string_length));
-                memcpy(buffer, packet_buffer->data, string_length + varint_size(string_length));
+                packet.size = string_length + varint_size(string_length);
+                packet.data = malloc(string_length + varint_size(string_length));
+                memcpy(
+                  packet.data,
+                  packet_buffer->data,
+                  string_length + varint_size(string_length));
             }
 
             i32 index              = 0;
             i32 packet_buffer_size = 1 + string_length + varint_size(string_length);
+            buffer_clear(packet_buffer);
             if (client->params & CLIENTPARAMS_COMPRESSED)
             {
-                // First, let's get a buffer of the data to compress
-                buffer_clear(packet_buffer);
-                buffer_append_u8(packet_buffer, packet_id);
-                buffer_append(packet_buffer, buffer, packet_buffer_size - 1);
-
-                size_t data_length = 0;
-                buffer_clear(compression_buffer);
-                if (packet_buffer_size >= COMPRESSION_THRESHOLD)
+                if (
+                  _network_manager_compress_packet(packet_buffer, compression_buffer, &packet) < 0)
                 {
-                    // Compress the packet
-                    buffer_reserve(compression_buffer, zng_compressBound(packet_buffer->size));
-
-                    data_length = compression_buffer->capacity;
-                    i32 ret     = zng_compress(
-                      compression_buffer->data,
-                      &data_length,
-                      packet_buffer->data,
-                      packet_buffer->size);
-                    if (ret != Z_OK)    // bruh
-                    {
-                        printf("Error compressing packet: %d\n", ret);
-                        pthread_exit(NULL);
-                    }
-
-                    compression_buffer->size = data_length;
-                    data_length              = packet_buffer->size;
+                    free(packet.data);
+                    pthread_exit(NULL);
                 }
-                else
-                    // Don't compress the packet
-                    buffer_append(compression_buffer, packet_buffer->data, packet_buffer->size);
-
-                // Now, let's write the packet to the client
-                buffer_clear(packet_buffer);
-                varint_encode(
-                  packet_buffer->data,
-                  varint_size(data_length) + compression_buffer->size);    // Packet Length
-                index += varint_size(varint_size(data_length) + data_length);
-                buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
-                varint_encode(packet_buffer->data + index, data_length);    // Data Length
-                index += varint_size(data_length);
-                memcpy(    // Compressed Data(Packet ID + Data)
-                  packet_buffer->data + index,
-                  compression_buffer->data,
-                  compression_buffer->size);
-                packet_buffer->size = index + compression_buffer->size;
             }
             else
             {
-                buffer_clear(packet_buffer);
-                buffer_reserve(packet_buffer, packet_buffer_size + varint_size(packet_buffer_size));
-                varint_encode(packet_buffer->data, packet_buffer_size);    // Packet Length
-                packet_buffer->data[varint_size(packet_buffer_size)] = packet_id;    // Packet ID
-                memcpy(                                                              // Packet Data
-                  packet_buffer->data + varint_size(packet_buffer_size) + 1,
-                  buffer,
-                  packet_buffer_size - 1);
-                packet_buffer->size = packet_buffer_size + varint_size(packet_buffer_size);
+                varint_encode(packet_buffer->data, packet.size + 1);    // Packet Length
+                index += varint_size(packet.size + 1);
+                buffer_reserve(packet_buffer, index + 1 + packet.size);
+                packet_buffer->data[index++] = packet.packet_id;    // Packet ID
+                memcpy(packet_buffer->data + index, packet.data,
+                       packet.size);    // Packet Data
+                packet_buffer->size = index + packet.size;
             }
 
             i32 ret = socket_send(client->socket, packet_buffer->data, packet_buffer->size);
@@ -656,72 +677,29 @@ void *network_manager_thread(void *args)
             i32 index = 0;
             if (client->params & CLIENTPARAMS_COMPRESSED)
             {
-                // First, let's get a buffer of the data to compress
-                buffer_append_u8(packet_buffer, packet->packet_id);
-                buffer_append(packet_buffer, packet->data, packet->size);
-
-                size_t data_length = 0;
-                buffer_clear(compression_buffer);
-                if ((packet->size + 1) >= COMPRESSION_THRESHOLD)
+                if (_network_manager_compress_packet(packet_buffer, compression_buffer, packet) < 0)
                 {
-                    // Compress the packet
-                    buffer_reserve(compression_buffer, zng_compressBound(packet_buffer->size));
+                    buffer_clear(packet_buffer);
+                    buffer_append(packet_buffer, "Compression failed.", 19);
+                    _network_manager_disconnect(
+                      clients,
+                      packet_buffer,
+                      compression_buffer,
+                      packet->client_id);
 
-                    data_length = compression_buffer->capacity;
-                    i32 ret     = zng_compress(
-                      compression_buffer->data,
-                      &data_length,
-                      packet_buffer->data,
-                      packet_buffer->size);
-                    if (ret != Z_OK)
-                    {
-                        printf(
-                          "Error %d: Failed to compress packet! Disconnect client %d\n",
-                          ret,
-                          packet->client_id);
-
-                        buffer_clear(packet_buffer);
-                        buffer_append(packet_buffer, "Compression failed.", 19);
-                        _network_manager_disconnect(
-                          clients,
-                          packet_buffer,
-                          compression_buffer,
-                          packet->client_id);
-
-                        free(packet->data);
-                        free(packet);
-                        continue;
-                    }
-
-                    compression_buffer->size = data_length;
-                    data_length              = packet_buffer->size;
+                    free(packet->data);
+                    free(packet);
+                    continue;
                 }
-                else
-                    // Don't compress the packet
-                    buffer_append(compression_buffer, packet_buffer->data, packet_buffer->size);
-
-                // Now, let's write the packet to the client
-                buffer_clear(packet_buffer);
-                varint_encode(
-                  packet_buffer->data,
-                  varint_size(data_length) + compression_buffer->size);    // Packet Length
-                index += varint_size(varint_size(data_length) + data_length);
-                buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
-                varint_encode(packet_buffer->data + index, data_length);    // Data Length
-                index += varint_size(data_length);
-                memcpy(    // Compressed Data(Packet ID + Data)
-                  packet_buffer->data + index,
-                  compression_buffer->data,
-                  compression_buffer->size);
-                packet_buffer->size = index + compression_buffer->size;
             }
             else
             {
                 varint_encode(packet_buffer->data, packet->size + 1);    // Packet Length
                 index += varint_size(packet->size + 1);
                 buffer_reserve(packet_buffer, index + 1 + packet->size);
-                packet_buffer->data[index++] = packet->packet_id;                   // Packet ID
-                memcpy(packet_buffer->data + index, packet->data, packet->size);    // Packet Data
+                packet_buffer->data[index++] = packet->packet_id;    // Packet ID
+                memcpy(packet_buffer->data + index, packet->data,
+                       packet->size);    // Packet Data
                 packet_buffer->size = index + packet->size;
             }
 
