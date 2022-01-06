@@ -9,6 +9,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Copper-MC)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Copper-MC)
 option(BUILD_SHARED_LIBS "" off)
 
+find_package(json-c CONFIG) # Needs to be in here for some reason
 add_subdirectory(extern)
 
 set(THREADS_PREFER_PTHREAD_FLAG on)
@@ -18,7 +19,7 @@ if(NOT CMAKE_USE_PTHREADS_INIT)
     message(FATAL_ERROR "Copper-MC requires pthreads")
 endif()
 
-find_package(OpenSSL REQUIRED)
+find_package(OpenSSL REQUIRED Crypto)
 
 set(SOURCE_FILES
     source/main.c
@@ -42,4 +43,4 @@ set_target_properties(main-executable PROPERTIES OUTPUT_NAME "Copper-MC")
 target_include_directories(main-executable PUBLIC "extern")
 target_include_directories(main-executable PRIVATE "source") # to allow paths relative to project root
 
-target_link_libraries(main-executable PRIVATE m Threads::Threads zlib OpenSSL::Crypto)
+target_link_libraries(main-executable PRIVATE m Threads::Threads zlib OpenSSL::Crypto curl json-c::json-c)
