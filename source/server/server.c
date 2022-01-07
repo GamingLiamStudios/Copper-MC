@@ -51,11 +51,8 @@ void server_run()
     {
         // Little test code
         struct packet *packet;
-        while (true)
+        while ((packet = queue_pop(serverbound_packets)))
         {
-            packet = queue_pop(serverbound_packets);
-            if (packet == NULL) break;
-
             printf("Packet received from client %d\n", packet->client_id);
             printf("Packet ID: %d\n", packet->packet_id);
             printf("Packet size: %d\n", packet->size);

@@ -54,7 +54,8 @@ u32 slotmap_insert(struct slotmap *map, void *value)
     u32 user_key = _slotmap_set_key_index(free_slot, free_slot_index);
 
     map->slots[free_slot_index] = _slotmap_set_key_index(free_slot, map->size);
-    map->data[free_slot_index]  = (struct slotmap_entry) { user_key, value };
+    map->data[map->size].key    = user_key;
+    map->data[map->size].value  = value;
 
     map->size++;
 
@@ -79,8 +80,8 @@ int slotmap_remove(struct slotmap *map, u32 key)
 
     map->slots[key_index] = _slotmap_increment_generation(_slotmap_set_key_index(slot, key_index));
 
-    struct slotmap_entry entry = map->data[key_index];
-    entry                      = map->data[map->size - 1];
+    struct slotmap_entry entry = map->data[map->size - 1];
+    map->data[map->size - 1]   = (struct slotmap_entry) { 0, NULL };
 
     map->slots[_slotmap_key_to_index(entry.key)] =
       _slotmap_set_key_index(map->slots[_slotmap_key_to_index(entry.key)], slot_index);

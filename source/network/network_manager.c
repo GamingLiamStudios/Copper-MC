@@ -138,6 +138,36 @@ i32 _network_manager_compress_packet(
     return 0;
 }
 
+void _network_manager_destroy_client(struct network_client *client)
+{
+    if (client->params & CLIENTPARAMS_ENCRYPTED)
+    {
+        struct encryption_keys *ctx = client->cipher_key;
+
+        EVP_EncryptFinal(ctx->enc, NULL, NULL);
+        EVP_DecryptFinal(ctx->dec, NULL, NULL);
+
+        EVP_CIPHER_CTX_free(ctx->enc);
+        EVP_CIPHER_CTX_free(ctx->dec);
+
+        free(ctx);
+    }
+    else if (client->cipher_key)
+    {
+        struct login_encrypt_temp *temp = client->cipher_key;
+
+        RSA_free(temp->rsa);
+        free(temp->username);
+        free(temp);
+    }
+
+    socket_destroy(client->socket);
+    client->params     = 0;
+    client->state      = 0;
+    client->cipher_key = NULL;
+    free(client);
+}
+
 void _network_manager_disconnect(
   struct slotmap *clients,
   struct buffer  *packet_buffer,
@@ -175,8 +205,7 @@ void _network_manager_disconnect(
                   string_length + varint_size(string_length));
             }
 
-            i32 index              = 0;
-            i32 packet_buffer_size = 1 + string_length + varint_size(string_length);
+            i32 index = 0;
             buffer_clear(packet_buffer);
             if (client->params & CLIENTPARAMS_COMPRESSED)
             {
@@ -226,22 +255,8 @@ void _network_manager_disconnect(
     default: break;
     }
 
-    if (client->params & CLIENTPARAMS_ENCRYPTED)
-    {
-        struct encryption_keys *ctx = client->cipher_key;
-
-        EVP_EncryptFinal(ctx->enc, NULL, NULL);
-        EVP_DecryptFinal(ctx->dec, NULL, NULL);
-
-        EVP_CIPHER_CTX_free(ctx->enc);
-        EVP_CIPHER_CTX_free(ctx->dec);
-
-        free(ctx);
-    }
-
-    socket_destroy(client->socket);
-    free(slotmap_get(clients, client_id));
     slotmap_remove(clients, client_id);
+    _network_manager_destroy_client(client);
 }
 
 void _network_manager_cleanup(void *args)
@@ -275,6 +290,7 @@ void _network_manager_cleanup(void *args)
     free(manager->socket);
     free(manager->packet_queue);
     free(manager->packet_buffer);
+    free(manager->compression_buffer);
     free(manager);
 
     printf("Closing Network Manager\n");
@@ -367,7 +383,14 @@ void _network_manager_process_packets(
             case 0x01:
             {
                 // Status Ping
-                queue_push(clientbound_packets, packet);
+                struct packet *status_packet = malloc(sizeof(struct packet));
+                status_packet->client_id     = packet->client_id;
+                status_packet->packet_id     = packet->packet_id;
+
+                status_packet->size = packet->size;
+                status_packet->data = malloc(packet->size);
+                memcpy(status_packet->data, packet->data, packet->size);
+                queue_push(clientbound_packets, status_packet);
 
                 struct packet *disconnect_signal = malloc(sizeof(struct packet));
                 disconnect_signal->client_id     = packet->client_id;
@@ -545,7 +568,7 @@ void _network_manager_process_packets(
                 u8 *secret            = malloc(RSA_size(temp->rsa) - 11);
                 i32 secret_length     = RSA_private_decrypt(
                   enc_secret_length,
-                  packet->data + varint_size(secret_length),
+                  packet->data + varint_size(enc_secret_length),
                   secret,
                   temp->rsa,
                   RSA_PKCS1_PADDING);
@@ -809,7 +832,11 @@ void *network_manager_thread(void *args)
 
     socket  = malloc(sizeof(socket_t));
     *socket = socket_create();
-    if (*socket == SOCKET_ERROR) return NULL;
+    if (*socket == SOCKET_ERROR)
+    {
+        free(socket);
+        return NULL;
+    }
     if (socket_listen(*socket, PORT) == SOCKET_ERROR)
     {
         socket_destroy(*socket);
@@ -839,7 +866,6 @@ void *network_manager_thread(void *args)
 
     while (true)
     {
-        // FIXME: Figure out what's causing the invalid sockets after the first connection
         // First, let's accept new connections
         socket_t client;
         while (true)
@@ -855,7 +881,8 @@ void *network_manager_thread(void *args)
             client_data->socket                = client;
             client_data->state                 = CLIENTSTATE_HANDSHAKE;
             client_data->params                = 0;
-            slotmap_insert(clients, client_data);
+            client_data->cipher_key            = NULL;
+            i32 key                            = slotmap_insert(clients, client_data);
         }
 
         // Next, let's fetch all the packets from the clients
@@ -864,12 +891,6 @@ void *network_manager_thread(void *args)
              itt--)
         {
             struct network_client *client_data = itt->value;
-
-            if (client_data->params & CLIENTPARAMS_ENCRYPTED)
-            {
-                printf("Encrypted packets? These aren't supported!\n");
-                pthread_exit(NULL);
-            }
 
             i32 ret;
             while (true)
@@ -884,9 +905,8 @@ void *network_manager_thread(void *args)
                     if (ret == SOCKET_NO_DATA) break;
                     if (ret == SOCKET_NO_CONN)
                     {
-                        socket_destroy(client_data->socket);
                         slotmap_remove(clients, itt->key);
-                        free(client_data);
+                        _network_manager_destroy_client(client_data);
                         break;
                     }
 
@@ -909,9 +929,8 @@ void *network_manager_thread(void *args)
                     if (ret == SOCKET_NO_DATA) break;
                     if (ret == SOCKET_NO_CONN)
                     {
-                        socket_destroy(client_data->socket);
                         slotmap_remove(clients, itt->key);
-                        free(client_data);
+                        _network_manager_destroy_client(client_data);
                         break;
                     }
                 }
@@ -920,10 +939,7 @@ void *network_manager_thread(void *args)
                 i32 packet_length = varint_decode(packet_buffer->data);
                 index += varint_size(packet_length);
 
-                printf(
-                  "Got packet of size %d from Client %d\n",
-                  packet_length,
-                  client_data->socket);
+                printf("Got packet of size %d from Client %d\n", packet_length, itt->key);
 
                 while (packet_length > buffer_size(packet_buffer))
                 {
@@ -988,7 +1004,7 @@ void *network_manager_thread(void *args)
                         buffer_clear(compression_buffer);
                         buffer_reserve(compression_buffer, data_length);
                         size_t uncompressed_size = compression_buffer->capacity;
-                        i32    ret               = zng_uncompress(
+                        ret                      = zng_uncompress(
                           compression_buffer->data,
                           &uncompressed_size,
                           packet_buffer->data + index,
@@ -1052,18 +1068,15 @@ void *network_manager_thread(void *args)
         struct packet *packet;
         while ((packet = queue_pop(clientbound_packets)))
         {
-            struct network_client *client = slotmap_get(clients, packet->client_id);
-            if (client == NULL) continue;
+            struct network_client *client_data = slotmap_get(clients, packet->client_id);
+            if (client_data == NULL) continue;
 
-            socket_t client_socket = client->socket;
+            socket_t client_socket = client_data->socket;
             if (client_socket == SOCKET_ERROR)
             {
                 printf("Client %d is no longer connected!\n", packet->client_id);
-                socket_destroy(client_socket);
-                free(slotmap_get(clients, packet->client_id));
                 slotmap_remove(clients, packet->client_id);
-                free(packet->data);
-                free(packet);
+                _network_manager_destroy_client(client_data);
                 continue;
             }
 
@@ -1081,9 +1094,9 @@ void *network_manager_thread(void *args)
                       packet->client_id);
                     break;
                 case CLIENTSIGNAL_ENABLE_COMPRESSION:
-                    client->params |= CLIENTPARAMS_COMPRESSED;
+                    client_data->params |= CLIENTPARAMS_COMPRESSED;
                     break;
-                case CLIENTSIGNAL_SWITCH_STATE: client->state = packet->data[1]; break;
+                case CLIENTSIGNAL_SWITCH_STATE: client_data->state = packet->data[1]; break;
                 default: printf("Client %d sent an unknown signal!\n", packet->client_id);
                 }
                 free(packet->data);
@@ -1092,7 +1105,7 @@ void *network_manager_thread(void *args)
             }
 
             i32 index = 0;
-            if (client->params & CLIENTPARAMS_COMPRESSED)
+            if (client_data->params & CLIENTPARAMS_COMPRESSED)
             {
                 if (_network_manager_compress_packet(packet_buffer, compression_buffer, packet) < 0)
                 {
@@ -1120,9 +1133,9 @@ void *network_manager_thread(void *args)
                 packet_buffer->size = index + packet->size;
             }
 
-            if (client->params & CLIENTPARAMS_ENCRYPTED)
+            if (client_data->params & CLIENTPARAMS_ENCRYPTED)
             {
-                struct encryption_keys *ctx = client->cipher_key;
+                struct encryption_keys *ctx = client_data->cipher_key;
 
                 buffer_reserve(compression_buffer, packet_buffer->size);
                 i32 len = compression_buffer->capacity;

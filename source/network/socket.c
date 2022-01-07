@@ -163,7 +163,7 @@ i32 socket_recv(socket_t socket, void *buffer, i32 buffer_size)
     return bytes;
 }
 
-i32 socket_send(socket_t socket, const void *buffer, i32 buffer_size)
+i32 socket_send(socket_t socket, const u8 *buffer, i32 buffer_size)
 {
     i32 bytes = send(socket, buffer, buffer_size, 0);
     if (bytes < 0)
