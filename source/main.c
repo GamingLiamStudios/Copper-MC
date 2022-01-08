@@ -4,6 +4,7 @@
 
 #include "server/server.h"
 #include <curl/curl.h>
+#include <openssl/crypto.h>
 
 int main(int argv, char **argc)
 {
@@ -12,6 +13,7 @@ int main(int argv, char **argc)
     // One-time Initialization
     srand(time(NULL));
     curl_global_init(CURL_GLOBAL_ALL);
+    OPENSSL_init();
 
     server_run();
 

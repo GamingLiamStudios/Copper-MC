@@ -147,6 +147,7 @@ void _network_manager_destroy_client(struct network_client *client)
     {
         struct encryption_keys *ctx = client->cipher_key;
 
+        // FIXME: Figure out why these segfault
         EVP_EncryptFinal(ctx->enc, NULL, NULL);
         EVP_DecryptFinal(ctx->dec, NULL, NULL);
 
@@ -645,6 +646,7 @@ void _network_manager_process_packets(
                 BIGNUM *bn        = BN_bin2bn(hash, SHA_DIGEST_LENGTH, NULL);
                 if (BN_is_bit_set(bn, 159))
                 {
+                    // FIXME: Can cause memory leak if realloc fails
                     hash_string    = realloc(hash_string, 2);
                     hash_string[0] = '-';
                     hash_string[1] = '\0';
@@ -653,6 +655,7 @@ void _network_manager_process_packets(
                     BN_bn2bin(bn, tmp);
                     for (i32 i = 0; i < BN_num_bytes(bn); i++) tmp[i] = ~tmp[i];
                     BN_bin2bn(tmp, BN_num_bytes(bn), bn);
+                    free(tmp);
 
                     BN_add_word(bn, 1);
                 }
@@ -660,6 +663,7 @@ void _network_manager_process_packets(
                 char *hex = BN_bn2hex(bn);
                 while (strlen(hex) && hex[0] == '0') memmove(hex, hex + 1, strlen(hex));
 
+                // FIXME: Can cause memory leak & some other bad shit if realloc fails
                 hash_string = realloc(hash_string, strlen(hex) + strlen(hash_string) + 1);
                 memcpy(hash_string + strlen(hash_string), hex, strlen(hex));
                 hash_string[strlen(hash_string)] = '\0';
@@ -683,7 +687,6 @@ void _network_manager_process_packets(
                 free(secret);
 
                 // Get info on client from Mojang Servers
-
                 CURLU *url = curl_url();
                 curl_url_set(url, CURLUPART_SCHEME, "https", 0);
                 curl_url_set(url, CURLUPART_HOST, "sessionserver.mojang.com", 0);
@@ -692,6 +695,7 @@ void _network_manager_process_packets(
                 char *temp_string = malloc(strlen("username=") + strlen(temp->username) + 1);
                 sprintf(temp_string, "username=%s", temp->username);
                 curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
+                // FIXME: Can cause memory leak & some other bad shit if realloc fails
                 temp_string = realloc(temp_string, strlen("serverId=") + strlen(hash_string) + 1);
                 sprintf(temp_string, "serverId=%s", hash_string);
                 curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
@@ -708,9 +712,8 @@ void _network_manager_process_packets(
                 {
                     printf("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
                     free(temp->username);
-                    free(hash_string);
                     free(temp);
-                    free(secret);
+                    free(hash_string);
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
@@ -730,17 +733,14 @@ void _network_manager_process_packets(
                 curl_easy_cleanup(curl);
                 curl_url_cleanup(url);
                 free(temp->username);
-                free(hash_string);
                 free(temp);
-
-                printf("Received JSON: %s\n", packet_buffer->data);
+                free(hash_string);
 
                 // Parse JSON
                 json_object *root = json_tokener_parse((const char *) packet_buffer->data);
                 if (!root)
                 {
                     printf("Failed to parse JSON\n");
-                    free(secret);
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
@@ -761,7 +761,7 @@ void _network_manager_process_packets(
                 if (!id || !name)
                 {
                     printf("Failed to parse JSON\n");
-                    free(secret);
+                    json_object_put(root);
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
@@ -1177,11 +1177,13 @@ void *network_manager_thread(void *args)
                   packet_buffer->data,
                   packet_buffer->size);
 
+                // FIXME: Replace with actual handling of failure
                 i32 ret = socket_send(client_socket, compression_buffer->data, len);
                 if (ret == SOCKET_ERROR) pthread_exit(NULL);
             }
             else
             {
+                // FIXME: Replace with actual handling of failure
                 i32 ret = socket_send(client_socket, packet_buffer->data, packet_buffer->size);
                 if (ret == SOCKET_ERROR) pthread_exit(NULL);
             }

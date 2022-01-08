@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+void hexDump(const char *desc, const void *addr, const int len, int perLine);
+
 #ifndef HEXDUMP_H
 #define HEXDUMP_H
 

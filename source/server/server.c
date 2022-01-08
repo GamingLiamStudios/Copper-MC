@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
+
+#include <curl/curl.h>
+#include <openssl/crypto.h>
+
 #include "network/network_manager.h"
 
 #define TPS 20
@@ -29,6 +33,8 @@ void server_stop(int sig)
     queue_destroy(&packet_queue.serverbound);
 
     // TODO: Clean stop of server
+    curl_global_cleanup();
+    OPENSSL_cleanup();
     exit(0);
 }
 
