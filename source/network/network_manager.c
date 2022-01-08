@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -18,6 +19,7 @@
 #include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/sha.h>
+#include <openssl/bn.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 
@@ -83,6 +85,76 @@ enum
     CLIENTSIGNAL_ENABLE_COMPRESSION,
     CLIENTSIGNAL_SWITCH_STATE
 };
+
+void hexDump(const char *desc, const void *addr, const int len, int perLine)
+{
+    // Silently ignore silly per-line values.
+
+    if (perLine < 4 || perLine > 64) perLine = 16;
+
+    int                  i;
+    unsigned char        buff[perLine + 1];
+    const unsigned char *pc = (const unsigned char *) addr;
+
+    // Output description if given.
+
+    if (desc != NULL) printf("%s:\n", desc);
+
+    // Length checks.
+
+    if (len == 0)
+    {
+        printf("  ZERO LENGTH\n");
+        return;
+    }
+    if (len < 0)
+    {
+        printf("  NEGATIVE LENGTH: %d\n", len);
+        return;
+    }
+
+    // Process every byte in the data.
+
+    for (i = 0; i < len; i++)
+    {
+        // Multiple of perLine means new or first line (with line offset).
+
+        if ((i % perLine) == 0)
+        {
+            // Only print previous-line ASCII buffer for lines beyond first.
+
+            if (i != 0) printf("  %s\n", buff);
+
+            // Output the offset of current line.
+
+            printf("  %04x ", i);
+        }
+
+        // Now the hex code for the specific character.
+
+        printf(" %02x", pc[i]);
+
+        // And buffer a printable ASCII character for later.
+
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e))    // isprint() may be better.
+            buff[i % perLine] = '.';
+        else
+            buff[i % perLine] = pc[i];
+        buff[(i % perLine) + 1] = '\0';
+    }
+
+    // Pad out last line if not exactly perLine characters.
+
+    while ((i % perLine) != 0)
+    {
+        printf("   ");
+        i++;
+    }
+
+    // And print the final ASCII buffer.
+
+    printf("  %s\n", buff);
+}
 
 i32 _network_manager_compress_packet(
   struct buffer *packet_buffer,
@@ -298,12 +370,12 @@ void _network_manager_cleanup(void *args)
 
 size_t _network_manager_curl_read(void *buffer, size_t size, size_t nmemb, void *userp)
 {
-    i32            real_sze   = size * nmemb;
+    i32            real_size  = size * nmemb;
     struct buffer *buffer_ptr = userp;
 
-    buffer_append(buffer_ptr, buffer, real_sze);
+    buffer_append(buffer_ptr, buffer, real_size);
 
-    return real_sze;
+    return real_size;
 }
 
 void _network_manager_process_packets(
@@ -436,7 +508,7 @@ void _network_manager_process_packets(
                     RSA    *rsa = RSA_new();
                     BIGNUM *e   = BN_new();
                     BN_set_word(e, RSA_F4);
-                    RSA_generate_key_ex(rsa, 2048, e, NULL);
+                    RSA_generate_key_ex(rsa, 1024, e, NULL);
                     BN_free(e);
 
                     // Encryption Request Packet
@@ -444,19 +516,29 @@ void _network_manager_process_packets(
                     client_packet->client_id     = packet->client_id;
                     client_packet->packet_id     = 0x01;
 
-                    i32 der_length =
-                      i2d_RSAPublicKey(rsa, NULL);    // Get length of DER-Encoded Public Key
-                    client_packet->size = 6 + varint_size(der_length) +
-                      der_length;    // +6 for Server ID & Verify Token
+                    // Create BIO containing DER encoding
+                    BIO *pub = BIO_new(BIO_s_mem());
+                    i2d_RSA_PUBKEY_bio(pub, rsa);
+
+                    i32 der_length      = BIO_pending(pub);
+                    client_packet->size = varint_size(0) + varint_size(der_length) + der_length +
+                      5;    // +2 for Server ID, +5 for Verify Token
                     client_packet->data = malloc(client_packet->size);
 
-                    i32 index                    = 0;
-                    client_packet->data[index++] = 0;
+                    i32 index = 0;
+
+                    // Server ID
+                    varint_encode(client_packet->data + index, 0);
+                    index += varint_size(0);
+
+                    // Public Key
                     varint_encode(client_packet->data + index, der_length);
                     index += varint_size(der_length);
-                    u8 *der_data = client_packet->data + index;
-                    i2d_RSA_PUBKEY(rsa, &der_data);
+                    BIO_read(pub, client_packet->data + index, der_length);
                     index += der_length;
+                    BIO_free_all(pub);
+
+                    // Verify Token
                     varint_encode(client_packet->data + index, 4);
                     index += varint_size(4);
                     client_packet->data[index++] = rand() & 0xFF;
@@ -468,6 +550,7 @@ void _network_manager_process_packets(
                     temp->rsa                       = rsa;
                     temp->username                  = username;
                     memcpy(temp->verify, client_packet->data + (index - 4), 4);
+                    client_data->cipher_key = temp;
 
                     queue_push(clientbound_packets, client_packet);
                 }
@@ -612,58 +695,50 @@ void _network_manager_process_packets(
                 SHA1_Init(&sha);
                 SHA1_Update(&sha, secret, secret_length);
 
-                u8 *der_public_key        = NULL;
-                i32 der_public_key_length = i2d_RSAPublicKey(temp->rsa, &der_public_key);
-                SHA1_Update(&sha, der_public_key, der_public_key_length);
-                OPENSSL_free(der_public_key);
+                BIO *pub = BIO_new(BIO_s_mem());
+                i2d_RSA_PUBKEY_bio(pub, temp->rsa);
+
+                i32 der_length     = BIO_pending(pub);
+                u8 *der_public_key = malloc(der_length);
+                BIO_read(pub, der_public_key, der_length);
+                SHA1_Update(&sha, der_public_key, der_length);
+                BIO_free_all(pub);
 
                 u8 *hash = malloc(SHA_DIGEST_LENGTH);
                 SHA1_Final(hash, &sha);
+                free(der_public_key);
 
-                // MC-style SHA1 Hex Digest
-                char *hash_string;
-                if (hash[0] & 0b10000000)
+                // MC-style hex digest
+                char *hash_string = malloc(1);
+                hash_string[0]    = '\0';
+                BIGNUM *bn        = BN_bin2bn(hash, SHA_DIGEST_LENGTH, NULL);
+                if (BN_is_bit_set(bn, 159))
                 {
-                    for (int i = 0; i < SHA_DIGEST_LENGTH; i++) hash[i] = ~hash[i];
-
-                    u16 carry = 1;
-                    for (int i = SHA_DIGEST_LENGTH - 1; i > 0 && carry != 0; i--)
-                    {
-                        carry += hash[i];
-                        hash[i] = carry & 0xFF;
-                        carry >>= 8;
-                    }
-
-                    hash_string    = malloc(SHA_DIGEST_LENGTH * 2 + 1);
+                    hash_string    = realloc(hash_string, 2);
                     hash_string[0] = '-';
-                    for (int i = 0; i < SHA_DIGEST_LENGTH; i++)
-                        sprintf(hash_string + 1 + i * 2, "%02hhx", hash[i]);
+                    hash_string[1] = '\0';
+
+                    u8 *tmp = malloc(BN_num_bytes(bn));
+                    BN_bn2bin(bn, tmp);
+                    for (i32 i = 0; i < BN_num_bytes(bn); i++) tmp[i] = ~tmp[i];
+                    BN_bin2bn(tmp, BN_num_bytes(bn), bn);
+
+                    BN_add_word(bn, 1);
                 }
-                else
-                {
-                    hash_string = malloc(SHA_DIGEST_LENGTH * 2);
-                    for (int i = 0; i < SHA_DIGEST_LENGTH * 2; i++)
-                        sprintf(hash_string + i * 2, "%02hhx", hash[i]);
-                }
+
+                char *hex = BN_bn2hex(bn);
+                while (strlen(hex) && hex[0] == '0') memmove(hex, hex + 1, strlen(hex));
+
+                hash_string = realloc(hash_string, strlen(hex) + strlen(hash_string) + 1);
+                memcpy(hash_string + strlen(hash_string), hex, strlen(hex));
+                hash_string[strlen(hash_string)] = '\0';
+                for (int i = 0; i < strlen(hash_string); i++)
+                    hash_string[i] = tolower(hash_string[i]);
+
+                OPENSSL_free(hex);
+                BN_free(bn);
                 free(hash);
                 RSA_free(temp->rsa);
-
-                // Get info on client from Mojang Servers
-                CURL *curl = curl_easy_init();
-
-                const char *fmt =
-                  "https://sessionserver.mojang.com/session/minecraft/"
-                  "hasJoined?username=%s&serverId=%s";
-                char *url = malloc(strlen(fmt) + strlen(temp->username) + strlen(hash_string) + 1);
-                snprintf(
-                  url,
-                  strlen(fmt) + strlen(temp->username) + strlen(hash_string) + 1,
-                  fmt,
-                  temp->username,
-                  hash_string);
-                free(temp->username);
-                free(hash_string);
-                free(temp);
 
                 // Setup Encryption
                 EVP_CIPHER_CTX *enc = EVP_CIPHER_CTX_new();
@@ -676,8 +751,24 @@ void _network_manager_process_packets(
                 client_data->params |= CLIENTPARAMS_ENCRYPTED;
                 free(secret);
 
-                // Continue after that rude interruption
-                curl_easy_setopt(curl, CURLOPT_URL, fmt);
+                // Get info on client from Mojang Servers
+
+                CURLU *url = curl_url();
+                curl_url_set(url, CURLUPART_SCHEME, "https", 0);
+                curl_url_set(url, CURLUPART_HOST, "sessionserver.mojang.com", 0);
+                curl_url_set(url, CURLUPART_PATH, "/session/minecraft/hasJoined", 0);
+
+                char *temp_string = malloc(strlen("username=") + strlen(temp->username) + 1);
+                sprintf(temp_string, "username=%s", temp->username);
+                curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
+                temp_string = realloc(temp_string, strlen("serverId=") + strlen(hash_string) + 1);
+                sprintf(temp_string, "serverId=%s", hash_string);
+                curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
+                free(temp_string);
+
+                CURL *curl = curl_easy_init();
+                curl_easy_setopt(curl, CURLOPT_CURLU, url);
+                curl_easy_setopt(curl, CURLOPT_HTTPGET, 1);
                 curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _network_manager_curl_read);
                 curl_easy_setopt(curl, CURLOPT_WRITEDATA, packet_buffer);
 
@@ -685,7 +776,9 @@ void _network_manager_process_packets(
                 if (res != CURLE_OK)
                 {
                     printf("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
-                    free(url);
+                    free(temp->username);
+                    free(hash_string);
+                    free(temp);
                     free(secret);
 
                     // Send disconnect signal
@@ -701,9 +794,15 @@ void _network_manager_process_packets(
                       packet->client_id);
                     break;
                 }
+                buffer_append_u8(packet_buffer, 0);    // Ensure there is a null-terminator
 
                 curl_easy_cleanup(curl);
-                free(url);
+                curl_url_cleanup(url);
+                free(temp->username);
+                free(hash_string);
+                free(temp);
+
+                printf("Received JSON: %s\n", packet_buffer->data);
 
                 // Parse JSON
                 json_object *root = json_tokener_parse((const char *) packet_buffer->data);
@@ -771,27 +870,28 @@ void _network_manager_process_packets(
                 // Send Login Success
                 client_packet            = malloc(sizeof(struct packet));
                 client_packet->client_id = packet->client_id;
-                client_packet->packet_id = 0x02;
+                client_packet->packet_id = -2;    // Echo Packet
                 client_packet->size =
-                  varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
+                  1 + varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
                 client_packet->data = malloc(client_packet->size);
 
-                varint_encode(client_packet->data, 36);
-                memset(client_packet->data + varint_size(36), '-', 36);
-                memcpy(client_packet->data + varint_size(36), uuid, 8);
-                memcpy(client_packet->data + varint_size(36) + 9, uuid + 8, 4);
-                memcpy(client_packet->data + varint_size(36) + 14, uuid + 12, 4);
-                memcpy(client_packet->data + varint_size(36) + 19, uuid + 16, 4);
-                memcpy(client_packet->data + varint_size(36) + 24, uuid + 20, 12);
-                varint_encode(client_packet->data + varint_size(36) + 36, strlen(username));
+                client_packet->data[0] = 0x02;
+                varint_encode(client_packet->data + 1, 36);
+                memset(client_packet->data + varint_size(36) + 1, '-', 36);
+                memcpy(client_packet->data + varint_size(36) + 1, uuid, 8);
+                memcpy(client_packet->data + varint_size(36) + 10, uuid + 8, 4);
+                memcpy(client_packet->data + varint_size(36) + 15, uuid + 12, 4);
+                memcpy(client_packet->data + varint_size(36) + 20, uuid + 16, 4);
+                memcpy(client_packet->data + varint_size(36) + 25, uuid + 20, 12);
+                varint_encode(client_packet->data + varint_size(36) + 37, strlen(username));
                 memcpy(
-                  client_packet->data + varint_size(36) + 36 + varint_size(strlen(username)),
+                  client_packet->data + varint_size(36) + 37 + varint_size(strlen(username)),
                   username,
                   strlen(username));
-                json_object_put(root);
 
                 // Server will bounce this back to client
                 queue_push(serverbound_packets, client_packet);
+                json_object_put(root);
 
                 // Update Client State
                 client_packet            = malloc(sizeof(struct packet));
@@ -1132,6 +1232,8 @@ void *network_manager_thread(void *args)
                        packet->size);    // Packet Data
                 packet_buffer->size = index + packet->size;
             }
+
+            hexDump(NULL, packet_buffer->data, packet_buffer->size, 16);
 
             if (client_data->params & CLIENTPARAMS_ENCRYPTED)
             {

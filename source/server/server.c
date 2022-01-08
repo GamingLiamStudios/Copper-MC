@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include <signal.h>
 #include "network/network_manager.h"
 
@@ -56,6 +57,28 @@ void server_run()
             printf("Packet received from client %d\n", packet->client_id);
             printf("Packet ID: %d\n", packet->packet_id);
             printf("Packet size: %d\n", packet->size);
+
+            if (packet->packet_id < 0)
+            {
+                switch (packet->packet_id)
+                {
+                case -2:
+                {
+                    printf("Bounce packet with id %02hhx received\n", packet->data[0]);
+
+                    struct packet *bounce_packet = malloc(sizeof(struct packet));
+                    bounce_packet->client_id     = packet->client_id;
+                    bounce_packet->packet_id     = packet->data[0];
+                    bounce_packet->size          = packet->size - 1;
+                    bounce_packet->data          = malloc(bounce_packet->size);
+                    memcpy(bounce_packet->data, packet->data + 1, packet->size - 1);
+
+                    queue_push(clientbound_packets, bounce_packet);
+                }
+                break;
+                default: break;
+                }
+            }
 
             free(packet->data);
             free(packet);
