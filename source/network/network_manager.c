@@ -24,6 +24,7 @@
 #include <json-c/json.h>
 
 #include "server/server.h"
+#include "logger/logger.h"
 #include "util/containers/slotmap.h"
 #include "util/containers/buffer.h"
 #include "util/containers/queue.h"
@@ -112,7 +113,7 @@ i32 _network_manager_compress_packet(
           packet_buffer->size);
         if (ret != Z_OK)
         {
-            printf("Error %d: Failed to compress packet!\n", ret);
+            logger_log_level(LOG_LEVEL_ERROR, "Error %d: Failed to compress packet!\n", ret);
             return -1;
         }
 
@@ -143,26 +144,38 @@ i32 _network_manager_compress_packet(
 
 void _network_manager_destroy_client(struct network_client *client)
 {
-    if (client->params & CLIENTPARAMS_ENCRYPTED)
+    if (!client) return;
+
+    if (client->cipher_key)
     {
-        struct encryption_keys *ctx = client->cipher_key;
+        if (client->params & CLIENTPARAMS_ENCRYPTED)
+        {
+            struct encryption_keys *ctx = client->cipher_key;
 
-        // FIXME: Figure out why these segfault
-        EVP_EncryptFinal(ctx->enc, NULL, NULL);
-        EVP_DecryptFinal(ctx->dec, NULL, NULL);
+            // FIXME: Figure out why these segfault
+            if (ctx->enc)
+            {
+                EVP_EncryptFinal(ctx->enc, NULL, NULL);
+                EVP_CIPHER_CTX_free(ctx->enc);
+                ctx->enc = NULL;
+            }
+            if (ctx->dec)
+            {
+                EVP_DecryptFinal(ctx->dec, NULL, NULL);
+                EVP_CIPHER_CTX_free(ctx->dec);
+                ctx->dec = NULL;
+            }
 
-        EVP_CIPHER_CTX_free(ctx->enc);
-        EVP_CIPHER_CTX_free(ctx->dec);
+            free(ctx);
+        }
+        else
+        {
+            struct login_encrypt_temp *temp = client->cipher_key;
 
-        free(ctx);
-    }
-    else if (client->cipher_key)
-    {
-        struct login_encrypt_temp *temp = client->cipher_key;
-
-        RSA_free(temp->rsa);
-        free(temp->username);
-        free(temp);
+            RSA_free(temp->rsa);
+            free(temp->username);
+            free(temp);
+        }
     }
 
     socket_destroy(client->socket);
@@ -253,7 +266,7 @@ void _network_manager_disconnect(
                 if (ret == SOCKET_ERROR) pthread_exit(NULL);
             }
 
-            printf("Client %d disconnected!\n", client_id);
+            logger_log("Client %d disconnected!\n", client_id);
         }
         break;
     default: break;
@@ -297,7 +310,7 @@ void _network_manager_cleanup(void *args)
     free(manager->compression_buffer);
     free(manager);
 
-    printf("Closing Network Manager\n");
+    logger_log("Closing Network Manager\n");
 }
 
 size_t _network_manager_curl_read(void *buffer, size_t size, size_t nmemb, void *userp)
@@ -331,7 +344,7 @@ void _network_manager_process_packets(
         {
             if (packet->packet_id > 0x00)
             {
-                printf("Unknown Packet! ID: %2X\n", packet->packet_id);
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
                 pthread_exit(NULL);
             }
 
@@ -348,7 +361,11 @@ void _network_manager_process_packets(
             index += varint_size(protocol_version);
 
             client_data->state = next_state;
-            printf("Handshaken with client %d into state %d\n", packet->client_id, next_state);
+            logger_log_level(
+              LOG_LEVEL_DEBUG,
+              "Handshaken with client %d into state %d\n",
+              packet->client_id,
+              next_state);
         }
         break;
         case CLIENTSTATE_STATUS:
@@ -407,7 +424,9 @@ void _network_manager_process_packets(
                 queue_push(clientbound_packets, disconnect_signal);
             }
             break;
-            default: printf("Unknown Packet! ID: %2X\n", packet->packet_id); pthread_exit(NULL);
+            default:
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
+                pthread_exit(NULL);
             }
             break;
         }
@@ -423,7 +442,11 @@ void _network_manager_process_packets(
                 memcpy(username, packet->data + varint_size(username_length), username_length);
                 username[username_length] = '\0';
 
-                printf("Client %d logged in as %s\n", packet->client_id, username);
+                logger_log_level(
+                  LOG_LEVEL_DEBUG,
+                  "Client %d logged in as %s\n",
+                  packet->client_id,
+                  username);
 
                 // Check if Local host
                 struct sockaddr_in rem_addr, loc_addr;
@@ -433,9 +456,6 @@ void _network_manager_process_packets(
                 getsockname(client_data->socket, (struct sockaddr *) &loc_addr, &len);
                 if (ONLINE_MODE && rem_addr.sin_addr.s_addr == loc_addr.sin_addr.s_addr)
                 {
-                    // Remote host
-                    printf("Client %d is remotehost\n", packet->client_id);
-
                     // Generate RSA Keypair
                     RSA    *rsa = RSA_new();
                     BIGNUM *e   = BN_new();
@@ -488,9 +508,6 @@ void _network_manager_process_packets(
                 }
                 else
                 {
-                    // Local host
-                    printf("Client %d is localhost\n", packet->client_id);
-
                     // Generate Player UUID
                     const char *UUID_hash_format = "OfflinePlayer:";
                     u8 *UUID_hash_string = malloc(strlen(UUID_hash_format) + strlen(username));
@@ -570,13 +587,15 @@ void _network_manager_process_packets(
                     client_packet->data[1]   = CLIENTSTATE_PLAY;
                     queue_push(clientbound_packets, client_packet);
 
+                    logger_log("%s has joined the Server.\n", username);
                     free(username);
                 }
             }
             break;
             case 0x01:
             {
-                struct login_encrypt_temp *temp = client_data->cipher_key;
+                struct login_encrypt_temp *temp     = client_data->cipher_key;
+                char                      *username = temp->username;
 
                 // Encryption Response
                 i32 enc_secret_length = varint_decode(packet->data);
@@ -602,7 +621,15 @@ void _network_manager_process_packets(
 
                 if (CRYPTO_memcmp(verify, temp->verify, verify_length) != 0)
                 {
-                    printf("Client %d failed to verify encryption\n", packet->client_id);
+                    logger_log_level(
+                      LOG_LEVEL_WARNING,
+                      "Client %d[%s] failed to authenticate\n",
+                      packet->client_id,
+                      username);
+                    logger_log_level(
+                      LOG_LEVEL_DEBUG,
+                      "Reason[%d]: verify mismatch.\n",
+                      packet->client_id);
                     free(secret);
                     free(verify);
 
@@ -710,7 +737,16 @@ void _network_manager_process_packets(
                 CURLcode res = curl_easy_perform(curl);
                 if (res != CURLE_OK)
                 {
-                    printf("curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+                    logger_log_level(
+                      LOG_LEVEL_WARNING,
+                      "Client %d[%s] failed to authenticate\n",
+                      packet->client_id,
+                      username);
+                    logger_log_level(
+                      LOG_LEVEL_DEBUG,
+                      "Reason[%d]: curl_easy_perform() failed: %s\n",
+                      packet->client_id,
+                      curl_easy_strerror(res));
                     free(temp->username);
                     free(temp);
                     free(hash_string);
@@ -732,7 +768,6 @@ void _network_manager_process_packets(
 
                 curl_easy_cleanup(curl);
                 curl_url_cleanup(url);
-                free(temp->username);
                 free(temp);
                 free(hash_string);
 
@@ -740,7 +775,15 @@ void _network_manager_process_packets(
                 json_object *root = json_tokener_parse((const char *) packet_buffer->data);
                 if (!root)
                 {
-                    printf("Failed to parse JSON\n");
+                    logger_log_level(
+                      LOG_LEVEL_WARNING,
+                      "Client %d[%s] failed to authenticate\n",
+                      packet->client_id,
+                      username);
+                    logger_log_level(
+                      LOG_LEVEL_DEBUG,
+                      "Reason[%d]: Failed to parse JSON\n",
+                      packet->client_id);
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
@@ -760,7 +803,15 @@ void _network_manager_process_packets(
                 json_object *name = json_object_object_get(root, "name");
                 if (!id || !name)
                 {
-                    printf("Failed to parse JSON\n");
+                    logger_log_level(
+                      LOG_LEVEL_WARNING,
+                      "Client %d[%s] failed to authenticate\n",
+                      packet->client_id,
+                      username);
+                    logger_log_level(
+                      LOG_LEVEL_DEBUG,
+                      "Reason[%d]: Failed to parse JSON\n",
+                      packet->client_id);
                     json_object_put(root);
 
                     // Send disconnect signal
@@ -777,8 +828,8 @@ void _network_manager_process_packets(
                     break;
                 }
 
-                const char *username = json_object_get_string(name);
-                const char *uuid     = json_object_get_string(id);
+                const char *json_username = json_object_get_string(name);
+                const char *json_uuid     = json_object_get_string(id);
 
                 // Set Compression Packet
                 struct packet *client_packet = malloc(sizeof(struct packet));
@@ -802,23 +853,23 @@ void _network_manager_process_packets(
                 client_packet            = malloc(sizeof(struct packet));
                 client_packet->client_id = packet->client_id;
                 client_packet->packet_id = -2;    // Echo Packet
-                client_packet->size =
-                  1 + varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
+                client_packet->size      = 1 + varint_size(strlen(json_username)) +
+                  strlen(json_username) + varint_size(36) + 36;
                 client_packet->data = malloc(client_packet->size);
 
                 client_packet->data[0] = 0x02;
                 varint_encode(client_packet->data + 1, 36);
                 memset(client_packet->data + varint_size(36) + 1, '-', 36);
-                memcpy(client_packet->data + varint_size(36) + 1, uuid, 8);
-                memcpy(client_packet->data + varint_size(36) + 10, uuid + 8, 4);
-                memcpy(client_packet->data + varint_size(36) + 15, uuid + 12, 4);
-                memcpy(client_packet->data + varint_size(36) + 20, uuid + 16, 4);
-                memcpy(client_packet->data + varint_size(36) + 25, uuid + 20, 12);
-                varint_encode(client_packet->data + varint_size(36) + 37, strlen(username));
+                memcpy(client_packet->data + varint_size(36) + 1, json_uuid, 8);
+                memcpy(client_packet->data + varint_size(36) + 10, json_uuid + 8, 4);
+                memcpy(client_packet->data + varint_size(36) + 15, json_uuid + 12, 4);
+                memcpy(client_packet->data + varint_size(36) + 20, json_uuid + 16, 4);
+                memcpy(client_packet->data + varint_size(36) + 25, json_uuid + 20, 12);
+                varint_encode(client_packet->data + varint_size(36) + 37, strlen(json_username));
                 memcpy(
-                  client_packet->data + varint_size(36) + 37 + varint_size(strlen(username)),
-                  username,
-                  strlen(username));
+                  client_packet->data + varint_size(36) + 37 + varint_size(strlen(json_username)),
+                  json_username,
+                  strlen(json_username));
 
                 // Server will bounce this back to client
                 queue_push(serverbound_packets, client_packet);
@@ -833,13 +884,20 @@ void _network_manager_process_packets(
                 client_packet->data[0]   = CLIENTSIGNAL_SWITCH_STATE;
                 client_packet->data[1]   = CLIENTSTATE_PLAY;
                 queue_push(clientbound_packets, client_packet);
+
+                logger_log("%s has joined the Server.\n", username);
+                free(username);
             }
             break;
-            default: printf("Unknown Packet! ID: %2X\n", packet->packet_id); pthread_exit(NULL);
+            default:
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
+                pthread_exit(NULL);
             }
         }
         break;
-        default: printf("Unknown Client State! %d\n", client_data->state); pthread_exit(NULL);
+        default:
+            logger_log_level(LOG_LEVEL_ERROR, "Unknown Client State! %d\n", client_data->state);
+            pthread_exit(NULL);
         }
 
         free(packet->data);
@@ -907,13 +965,13 @@ void *network_manager_thread(void *args)
             if (client == SOCKET_ERROR) pthread_exit(NULL);
             if (client == SOCKET_NO_CONN) break;
 
-            printf("Accepted new client!\n");
             struct network_client *client_data = malloc(sizeof(struct network_client));
             client_data->socket                = client;
             client_data->state                 = CLIENTSTATE_HANDSHAKE;
             client_data->params                = 0;
             client_data->cipher_key            = NULL;
             i32 key                            = slotmap_insert(clients, client_data);
+            logger_log_level(LOG_LEVEL_DEBUG, "Accepted new client %d\n", key);
         }
 
         // Next, let's fetch all the packets from the clients
@@ -970,7 +1028,11 @@ void *network_manager_thread(void *args)
                 i32 packet_length = varint_decode(packet_buffer->data);
                 index += varint_size(packet_length);
 
-                printf("Got packet of size %d from Client %d\n", packet_length, itt->key);
+                logger_log_level(
+                  LOG_LEVEL_DEBUG,
+                  "Got packet of size %d from Client %d\n",
+                  packet_length,
+                  itt->key);
 
                 while (packet_length > buffer_size(packet_buffer))
                 {
@@ -1042,10 +1104,11 @@ void *network_manager_thread(void *args)
                           packet_length - varint_size(data_length) - 1);
                         if (ret != Z_OK)
                         {
-                            printf(
-                              "Error %d: Failed to uncompress packet! Disconnect client %d\n",
-                              ret,
-                              packet->client_id);
+                            logger_log_level(
+                              LOG_LEVEL_DEBUG,
+                              "Client %d failed to decompress packet. Error %d\n",
+                              packet->client_id,
+                              ret);
 
                             buffer_clear(packet_buffer);
                             buffer_append(
@@ -1105,7 +1168,10 @@ void *network_manager_thread(void *args)
             socket_t client_socket = client_data->socket;
             if (client_socket == SOCKET_ERROR)
             {
-                printf("Client %d is no longer connected!\n", packet->client_id);
+                logger_log_level(
+                  LOG_LEVEL_DEBUG,
+                  "Client %d is no longer connected!\n",
+                  packet->client_id);
                 slotmap_remove(clients, packet->client_id);
                 _network_manager_destroy_client(client_data);
                 continue;
@@ -1128,7 +1194,12 @@ void *network_manager_thread(void *args)
                     client_data->params |= CLIENTPARAMS_COMPRESSED;
                     break;
                 case CLIENTSIGNAL_SWITCH_STATE: client_data->state = packet->data[1]; break;
-                default: printf("Client %d sent an unknown signal!\n", packet->client_id);
+                default:
+                    logger_log_level(
+                      LOG_LEVEL_WARNING,
+                      "Unknown signal %d on Client %d\n",
+                      packet->data[0],
+                      packet->client_id);
                 }
                 free(packet->data);
                 free(packet);

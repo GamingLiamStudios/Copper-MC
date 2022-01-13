@@ -8,6 +8,7 @@
 #include <curl/curl.h>
 #include <openssl/crypto.h>
 
+#include "logger/logger.h"
 #include "network/network_manager.h"
 
 #define TPS 20
@@ -21,7 +22,7 @@ struct packet_queue packet_queue;
 
 void server_stop(int sig)
 {
-    printf("Stopping Server\n");
+    logger_log("Stopping Server\n");
 
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);
@@ -60,9 +61,12 @@ void server_run()
         struct packet *packet;
         while ((packet = queue_pop(serverbound_packets)))
         {
-            printf("Packet received from client %d\n", packet->client_id);
-            printf("Packet ID: %d\n", packet->packet_id);
-            printf("Packet size: %d\n", packet->size);
+            logger_log_level(
+              LOG_LEVEL_DEBUG,
+              "Packet received from client %d\n",
+              packet->client_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Packet ID: %02hhx\n", packet->packet_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Packet size: %d\n", packet->size);
 
             if (packet->packet_id < 0)
             {
@@ -70,7 +74,10 @@ void server_run()
                 {
                 case -2:
                 {
-                    printf("Bounce packet with id %02hhx received\n", packet->data[0]);
+                    logger_log_level(
+                      LOG_LEVEL_DEBUG,
+                      "Bounce packet with id %02hhx received\n",
+                      packet->data[0]);
 
                     struct packet *bounce_packet = malloc(sizeof(struct packet));
                     bounce_packet->client_id     = packet->client_id;

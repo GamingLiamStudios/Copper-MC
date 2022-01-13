@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#include "logger/logger.h"
+
 #if !defined(PLATFORM_WINDOWS) && !defined(PLATFORM_UNIX)
 #error Platform not supported.
 #endif
@@ -88,7 +90,7 @@ i32 socket_listen(socket_t socket, i32 port)
     // Start listening for new connections
     if (listen(socket, SOMAXCONN) < 0)
     {
-        printf("socket_listen: listen() failed.\n");
+        logger_log_level(LOG_LEVEL_ERROR, "socket_listen: listen() failed.\n");
         return SOCKET_ERROR;
     }
 
@@ -153,7 +155,7 @@ i32 socket_recv(socket_t socket, void *buffer, i32 buffer_size)
     {
         if (errno != EWOULDBLOCK)
         {
-            printf("socket_recv: Connection closed.\n");
+            logger_log_level(LOG_LEVEL_ERROR, "socket_recv: Connection closed.\n");
             return SOCKET_NO_CONN;
         }
         else

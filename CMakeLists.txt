@@ -33,6 +33,8 @@ set(SOURCE_FILES
     source/util/containers/slotmap.c
     source/util/containers/queue.c
     source/util/containers/buffer.c
+
+    source/logger/logger.c
 )
 
 add_executable(main-executable ${SOURCE_FILES})

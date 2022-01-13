@@ -1,12 +1,15 @@
 #pragma once
 
 #include <stdio.h>
+#include "logger/logger.h"
 
 void hexDump(const char *desc, const void *addr, const int len, int perLine);
 
 #ifndef HEXDUMP_H
 #define HEXDUMP_H
 
+// TODO: Convert to logger. Since only used for debug, it's not top priority for this to be
+// thread-safe.
 // https://stackoverflow.com/a/7776146
 void hexDump(const char *desc, const void *addr, const int len, int perLine)
 {
