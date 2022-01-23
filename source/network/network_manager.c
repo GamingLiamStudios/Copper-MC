@@ -47,6 +47,8 @@ struct network_manager
 
     struct buffer *packet_buffer;
     struct buffer *compression_buffer;
+
+    u64 *connected_players;
 };
 
 struct network_client
@@ -189,6 +191,7 @@ void _network_manager_disconnect(
   struct slotmap *clients,
   struct buffer  *packet_buffer,
   struct buffer  *compression_buffer,
+  u64            *connected_players,
   i32             client_id)
 {
     struct network_client *client = slotmap_get(clients, client_id);
@@ -197,7 +200,7 @@ void _network_manager_disconnect(
     packet.packet_id = -1;
     switch (client->state)
     {
-    case CLIENTSTATE_PLAY: packet.packet_id = 0x40;
+    case CLIENTSTATE_PLAY: packet.packet_id = 0x40; (*connected_players)--;
     case CLIENTSTATE_LOGIN:
         if (packet.packet_id == -1) packet.packet_id = 0x00;
         {
@@ -266,7 +269,7 @@ void _network_manager_disconnect(
                 if (ret == SOCKET_ERROR) pthread_exit(NULL);
             }
 
-            logger_log("Client %d disconnected!\n", client_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Client %d disconnected!\n", client_id);
         }
         break;
     default: break;
@@ -291,6 +294,7 @@ void _network_manager_cleanup(void *args)
           manager->clients,
           manager->packet_buffer,
           manager->compression_buffer,
+          manager->connected_players,
           itt->key);
 
     slotmap_destroy(manager->clients);
@@ -328,7 +332,8 @@ void _network_manager_process_packets(
   struct queue        *packet_queue,
   struct packet_queue *packet_queues,
   struct buffer       *packet_buffer,
-  struct buffer       *compression_buffer)
+  struct buffer       *compression_buffer,
+  u64                 *connected_players)
 {
     struct queue *serverbound_packets = &packet_queues->serverbound;
     struct queue *clientbound_packets = &packet_queues->clientbound;
@@ -385,7 +390,7 @@ void _network_manager_process_packets(
                   "\"online\":%d,\"sample\":[]},\"description\":{\"text\":\"GLS' Copper-MC Testing "
                   "Server\"}}";
                 i32 string_length =
-                  snprintf(NULL, 0, status_format, MAX_PLAYERS, slotmap_size(clients));
+                  snprintf(NULL, 0, status_format, MAX_PLAYERS, *connected_players);
 
                 status_packet->size = varint_size(string_length) + string_length;
                 status_packet->data = malloc(status_packet->size + 1);    // For Null-Terminator
@@ -396,7 +401,7 @@ void _network_manager_process_packets(
                   string_length + 1,
                   status_format,
                   MAX_PLAYERS,
-                  slotmap_size(clients));
+                  *connected_players);
 
                 queue_push(clientbound_packets, status_packet);
             }
@@ -454,7 +459,7 @@ void _network_manager_process_packets(
 
                 getpeername(client_data->socket, (struct sockaddr *) &rem_addr, &len);
                 getsockname(client_data->socket, (struct sockaddr *) &loc_addr, &len);
-                if (ONLINE_MODE && rem_addr.sin_addr.s_addr == loc_addr.sin_addr.s_addr)
+                if (ONLINE_MODE && rem_addr.sin_addr.s_addr != loc_addr.sin_addr.s_addr)
                 {
                     // Generate RSA Keypair
                     RSA    *rsa = RSA_new();
@@ -539,7 +544,7 @@ void _network_manager_process_packets(
                     // Send Login Success
                     client_packet            = malloc(sizeof(struct packet));
                     client_packet->client_id = packet->client_id;
-                    client_packet->packet_id = 0x02;
+                    client_packet->packet_id = -2;    // Login Success bounce
                     client_packet->size =
                       varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
                     client_packet->data = malloc(client_packet->size);
@@ -587,6 +592,7 @@ void _network_manager_process_packets(
                     client_packet->data[1]   = CLIENTSTATE_PLAY;
                     queue_push(clientbound_packets, client_packet);
 
+                    (*connected_players)++;
                     logger_log("%s has joined the Server.\n", username);
                     free(username);
                 }
@@ -644,6 +650,7 @@ void _network_manager_process_packets(
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      connected_players,
                       packet->client_id);
                     break;
                 }
@@ -761,6 +768,7 @@ void _network_manager_process_packets(
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      connected_players,
                       packet->client_id);
                     break;
                 }
@@ -795,6 +803,7 @@ void _network_manager_process_packets(
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      connected_players,
                       packet->client_id);
                     break;
                 }
@@ -824,6 +833,7 @@ void _network_manager_process_packets(
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      connected_players,
                       packet->client_id);
                     break;
                 }
@@ -852,7 +862,7 @@ void _network_manager_process_packets(
                 // Send Login Success
                 client_packet            = malloc(sizeof(struct packet));
                 client_packet->client_id = packet->client_id;
-                client_packet->packet_id = -2;    // Echo Packet
+                client_packet->packet_id = -2;    // Login Success bounce
                 client_packet->size      = 1 + varint_size(strlen(json_username)) +
                   strlen(json_username) + varint_size(36) + 36;
                 client_packet->data = malloc(client_packet->size);
@@ -885,6 +895,7 @@ void _network_manager_process_packets(
                 client_packet->data[1]   = CLIENTSTATE_PLAY;
                 queue_push(clientbound_packets, client_packet);
 
+                (*connected_players)++;
                 logger_log("%s has joined the Server.\n", username);
                 free(username);
             }
@@ -893,6 +904,13 @@ void _network_manager_process_packets(
                 logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
                 pthread_exit(NULL);
             }
+        }
+        break;
+        case CLIENTSTATE_PLAY:
+        {
+            struct packet *packet_clone = malloc(sizeof(struct packet));
+            memcpy(packet_clone, packet, sizeof(struct packet));
+            queue_push(serverbound_packets, packet_clone);
         }
         break;
         default:
@@ -918,6 +936,8 @@ void *network_manager_thread(void *args)
 
     struct buffer *packet_buffer;
     struct buffer *compression_buffer;
+
+    u64 connected_players;
 
     socket  = malloc(sizeof(socket_t));
     *socket = socket_create();
@@ -952,6 +972,9 @@ void *network_manager_thread(void *args)
 
     netmgr->packet_buffer      = packet_buffer;
     netmgr->compression_buffer = compression_buffer;
+
+    connected_players         = 0;
+    netmgr->connected_players = &connected_players;
 
     while (true)
     {
@@ -1119,6 +1142,7 @@ void *network_manager_thread(void *args)
                               clients,
                               packet_buffer,
                               compression_buffer,
+                              &connected_players,
                               packet->client_id);
 
                             break;
@@ -1155,7 +1179,8 @@ void *network_manager_thread(void *args)
           packet_queue,
           packet_queues,
           packet_buffer,
-          compression_buffer);
+          compression_buffer,
+          &connected_players);
 
         // And finally, let's send the packets to the clients
         // TODO: Bulk send the packets for each client
@@ -1188,6 +1213,7 @@ void *network_manager_thread(void *args)
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      &connected_players,
                       packet->client_id);
                     break;
                 case CLIENTSIGNAL_ENABLE_COMPRESSION:
@@ -1217,6 +1243,7 @@ void *network_manager_thread(void *args)
                       clients,
                       packet_buffer,
                       compression_buffer,
+                      &connected_players,
                       packet->client_id);
 
                     free(packet->data);
