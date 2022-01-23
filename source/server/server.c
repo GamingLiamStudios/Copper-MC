@@ -13,38 +13,35 @@
 
 #define TPS 20
 
-// TODO: Make these not be global variables
-pthread_t network_thread;
-// pthread_t *world_threads;
-// pthread_t plugin_thread;
-
-struct packet_queue packet_queue;
+bool running;
+int  sigint_count;
 
 void server_stop(int sig)
 {
-    logger_log("Stopping Server\n");
-
-    pthread_cancel(network_thread);
-    pthread_join(network_thread, NULL);
-
-    struct packet *packet;
-    while ((packet = queue_pop(&packet_queue.clientbound))) free(packet);
-    while ((packet = queue_pop(&packet_queue.serverbound))) free(packet);
-    queue_destroy(&packet_queue.clientbound);
-    queue_destroy(&packet_queue.serverbound);
-
-    // TODO: Clean stop of server
-    curl_global_cleanup();
-    OPENSSL_cleanup();
-    exit(0);
+    running = false;
+    sigint_count++;
+    if (sigint_count > 1)
+    {
+        printf(
+          "\x1b[0;31m[ERROR] Received Multiple SIGINT, assuming Server is stuck. Forcing "
+          "shutdown.\x1b[0m\n");
+        exit(sig);
+    }
 }
 
 void server_run()
 {
+    sigint_count = 0;
+    running      = true;    // So the it doesn't ignore the SIGINT
     signal(SIGINT, server_stop);
 
-    struct queue *serverbound_packets;
-    struct queue *clientbound_packets;
+    pthread_t network_thread;
+    // pthread_t *world_threads;
+    // pthread_t plugin_thread;
+
+    struct packet_queue packet_queue;
+    struct queue       *serverbound_packets;
+    struct queue       *clientbound_packets;
 
     // Initialize the packet queue
     queue_init(&packet_queue.serverbound);
@@ -55,9 +52,9 @@ void server_run()
     // Initialize the network manager
     pthread_create(&network_thread, NULL, network_manager_thread, &packet_queue);
 
-    while (true)
+    logger_log("Starting Server!\n");
+    while (running)
     {
-        // Little test code
         struct packet *packet;
         while ((packet = queue_pop(serverbound_packets)))
         {
@@ -76,7 +73,7 @@ void server_run()
                 {
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Bounce packet with id %02hhx received\n",
+                      "Login Success packet with id %02hhx received\n",
                       packet->data[0]);
 
                     struct packet *bounce_packet = malloc(sizeof(struct packet));
@@ -91,6 +88,10 @@ void server_run()
                 break;
                 default: break;
                 }
+
+                free(packet->data);
+                free(packet);
+                continue;
             }
 
             free(packet->data);
@@ -100,4 +101,15 @@ void server_run()
         // Tick code
         usleep(1000 / TPS);
     }
+
+    logger_log("Stopping Server\n");
+
+    pthread_cancel(network_thread);
+    pthread_join(network_thread, NULL);
+
+    struct packet *packet;
+    while ((packet = queue_pop(&packet_queue.clientbound))) free(packet);
+    while ((packet = queue_pop(&packet_queue.serverbound))) free(packet);
+    queue_destroy(&packet_queue.clientbound);
+    queue_destroy(&packet_queue.serverbound);
 }

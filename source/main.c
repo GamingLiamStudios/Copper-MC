@@ -16,7 +16,6 @@ int main(int argv, char **argc)
     OPENSSL_init();
     logger_init();
 
-    logger_log("Starting Server!\n");
     server_run();
 
     // Cleanup

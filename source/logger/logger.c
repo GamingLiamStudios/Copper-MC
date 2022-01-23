@@ -63,6 +63,7 @@ void logger_log_level(int level, const char *message, ...)
 {
     if (LOG_LEVEL > level) return;
 
+    // TODO: Make sure this is cross-platform
     va_list args;
     va_start(args, message);
     int msg_len = vsnprintf(NULL, 0, message, args);
