@@ -64,8 +64,9 @@ struct network_client
     } state;
     enum
     {
-        CLIENTPARAMS_COMPRESSED = 0b01,
-        CLIENTPARAMS_ENCRYPTED  = 0b10
+        CLIENTPARAMS_COMPRESSED = 0b001,
+        CLIENTPARAMS_ENCRYPTED  = 0b010,
+        CLIENTPARAMS_VERSION    = 0b100
     } params;
 };
 
@@ -358,12 +359,16 @@ void _network_manager_process_packets(
             i32 protocol_version = varint_decode(packet->data + index);
             index += varint_size(protocol_version);
             i32 hostname_length = varint_decode(packet->data + index);
-            index += varint_size(protocol_version);
+            index += varint_size(hostname_length);
             index += hostname_length;    // Since we have no need for hostname
             index += 2;                  // Or the port.
 
             i32 next_state = varint_decode(packet->data + index);
             index += varint_size(protocol_version);
+
+            if (protocol_version == 754)
+                client_data->params |=
+                  CLIENTPARAMS_VERSION;    // Tell server we are using the same protocol version
 
             client_data->state = next_state;
             logger_log_level(
@@ -386,7 +391,7 @@ void _network_manager_process_packets(
                 status_packet->packet_id     = 0x00;
 
                 const char *status_format =
-                  "{\"version\":{\"name\":\"1.8.9\",\"protocol\":47},\"players\":{\"max\":%d,"
+                  "{\"version\":{\"name\":\"1.16.5\",\"protocol\":754},\"players\":{\"max\":%d,"
                   "\"online\":%d,\"sample\":[]},\"description\":{\"text\":\"GLS' Copper-MC Testing "
                   "Server\"}}";
                 i32 string_length =
@@ -441,6 +446,30 @@ void _network_manager_process_packets(
             {
             case 0x00:
             {
+                // Check if Protocol Version is valid
+                if (!(client_data->params & CLIENTPARAMS_VERSION))
+                {
+                    logger_log_level(
+                      LOG_LEVEL_INFO,
+                      "Client %d attempted connection with unsupported version\n",
+                      packet->client_id);
+
+                    // Send disconnect signal
+                    buffer_clear(packet_buffer);
+                    buffer_append(
+                      packet_buffer,
+                      "{\"text\":\"Attempted connection with unsupported version. Please try again "
+                      "with version 1.16.5\"}",
+                      94);
+                    _network_manager_disconnect(
+                      clients,
+                      packet_buffer,
+                      compression_buffer,
+                      connected_players,
+                      packet->client_id);
+                    break;
+                }
+
                 // Login Start
                 i32   username_length = varint_decode(packet->data);
                 char *username        = malloc(username_length + 1);
@@ -1009,10 +1038,12 @@ void *network_manager_thread(void *args)
             {
                 buffer_clear(packet_buffer);
 
+                // Am able to read 3 bytes because the max-length for any packet is guaranteed to
+                // fit in 3 bytes, and the minimum length for a packet is 3 bytes
                 if (client_data->params & CLIENTPARAMS_ENCRYPTED)
                 {
                     buffer_clear(compression_buffer);
-                    ret = buffer_read_socket(compression_buffer, client_data->socket, 5);
+                    ret = buffer_read_socket(compression_buffer, client_data->socket, 3);
                     if (ret == SOCKET_ERROR) pthread_exit(NULL);
                     if (ret == SOCKET_NO_DATA) break;
                     if (ret == SOCKET_NO_CONN)
@@ -1036,7 +1067,7 @@ void *network_manager_thread(void *args)
                 }
                 else
                 {
-                    ret = buffer_read_socket(packet_buffer, client_data->socket, 5);
+                    ret = buffer_read_socket(packet_buffer, client_data->socket, 3);
                     if (ret == SOCKET_ERROR) pthread_exit(NULL);
                     if (ret == SOCKET_NO_DATA) break;
                     if (ret == SOCKET_NO_CONN)

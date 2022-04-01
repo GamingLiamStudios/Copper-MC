@@ -78,10 +78,10 @@ void server_run()
 
                     struct packet *bounce_packet = malloc(sizeof(struct packet));
                     bounce_packet->client_id     = packet->client_id;
-                    bounce_packet->packet_id     = packet->data[0];
-                    bounce_packet->size          = packet->size - 1;
+                    bounce_packet->packet_id     = 0x02;
+                    bounce_packet->size          = packet->size;
                     bounce_packet->data          = malloc(bounce_packet->size);
-                    memcpy(bounce_packet->data, packet->data + 1, packet->size - 1);
+                    memcpy(bounce_packet->data, packet->data, packet->size);
 
                     queue_push(clientbound_packets, bounce_packet);
                 }
