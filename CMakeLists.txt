@@ -5,12 +5,12 @@ if(NOT MSVC)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
 endif()
 
+set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/.cmake)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Copper-MC)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Copper-MC)
 option(BUILD_SHARED_LIBS "" off)
 
-find_package(json-c CONFIG) # Needs to be in here for some reason
-add_subdirectory(extern)
+include(find_libraries)
 
 set(THREADS_PREFER_PTHREAD_FLAG on)
 find_package(Threads REQUIRED)
