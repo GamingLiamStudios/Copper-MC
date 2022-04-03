@@ -22,7 +22,6 @@ if(NOT CURL_FOUND)
     FetchContent_MakeAvailable(curl)
 endif()
 
-# find_package in main CMakeLists because it doesn't work in here for some reason
 find_package(json-c CONFIG)
 if(NOT json-c_FOUND)
     FetchContent_Declare(
