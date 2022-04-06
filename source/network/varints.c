@@ -3,13 +3,15 @@
 #define VARINT_SEGMENT  0x7F
 #define VARINT_CONTINUE 0x80
 
-inline i32 varint_size(u32 value)
+inline i32 varint_size(u64 value)
 {
-    if (value <= 0x7F) return 1;
-    if (value <= 0x3FFF) return 2;
-    if (value <= 0x1FFFFF) return 3;
-    if (value <= 0xFFFFFFF) return 4;
-    return 5;
+    i32 size = 1;
+    while (value > VARINT_SEGMENT)
+    {
+        value >>= 7;
+        size++;
+    }
+    return size;
 }
 
 inline void varint_encode(u8 *buffer, u64 value)
