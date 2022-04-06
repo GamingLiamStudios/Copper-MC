@@ -14,7 +14,7 @@ inline i32 varint_size(u64 value)
     return size;
 }
 
-inline void varint_encode(u8 *buffer, u64 value)
+inline void varlong_encode(u8 *buffer, u64 value)
 {
     do {
         u8 byte = value & VARINT_SEGMENT;
@@ -22,20 +22,6 @@ inline void varint_encode(u8 *buffer, u64 value)
         if (value != 0) byte |= VARINT_CONTINUE;
         *buffer++ = byte;
     } while (value != 0);
-}
-inline i32 varint_decode(const u8 *buffer)
-{
-    u32 value = 0;
-    u32 shift = 0;
-    u8  byte  = 0;
-
-    do {
-        byte = *buffer++;
-        value |= (u32) (byte & VARINT_SEGMENT) << shift;
-        shift += 7;
-    } while (byte & VARINT_CONTINUE);
-
-    return value;
 }
 
 inline i64 varlong_decode(const u8 *buffer)
