@@ -82,5 +82,27 @@ void packet_builder_write_string_ext(struct buffer *buffer, const wchar_t *value
     }
 
     packet_builder_write_varint(buffer, len);
-    buffer_append(buffer, (u8 *) value, len * sizeof(wchar_t));
+
+    u8  b;
+    u32 chr;
+    for (int i = 0; i < len; i++)
+    {
+        chr = value[i];
+        if (chr < 0x80)
+        {
+            packet_builder_write_ubyte(buffer, (u8) (chr & 0x7F));
+            continue;
+        }
+
+        if (chr <= 0x07FF)
+            b = 5;
+        else if (chr <= 0xFFFF)
+            b = 4;
+        else if (chr <= 0x10FFFF)
+            b = 3;
+
+        packet_builder_write_ubyte(buffer, (u8) ((0xFE << b) | (chr >> ((6 - b) * 6)))); // B1
+        for (int j = 6 - b; j > 0; j--)
+            packet_builder_write_ubyte(buffer, (u8) (0x80 | ((chr >> (j - 1) * 6) & 0x3F))); // B2-4
+    }
 }
