@@ -657,7 +657,7 @@ void _network_manager_process_packets(
                 if (CRYPTO_memcmp(verify, temp->verify, verify_length) != 0)
                 {
                     logger_log_level(
-                      LOG_LEVEL_WARNING,
+                      LOG_LEVEL_WARN,
                       "Client %d[%s] failed to authenticate\n",
                       packet->client_id,
                       username);
@@ -774,7 +774,7 @@ void _network_manager_process_packets(
                 if (res != CURLE_OK)
                 {
                     logger_log_level(
-                      LOG_LEVEL_WARNING,
+                      LOG_LEVEL_WARN,
                       "Client %d[%s] failed to authenticate\n",
                       packet->client_id,
                       username);
@@ -813,7 +813,7 @@ void _network_manager_process_packets(
                 if (!root)
                 {
                     logger_log_level(
-                      LOG_LEVEL_WARNING,
+                      LOG_LEVEL_WARN,
                       "Client %d[%s] failed to authenticate\n",
                       packet->client_id,
                       username);
@@ -842,7 +842,7 @@ void _network_manager_process_packets(
                 if (!id || !name)
                 {
                     logger_log_level(
-                      LOG_LEVEL_WARNING,
+                      LOG_LEVEL_WARN,
                       "Client %d[%s] failed to authenticate\n",
                       packet->client_id,
                       username);
@@ -1253,7 +1253,7 @@ void *network_manager_thread(void *args)
                 case CLIENTSIGNAL_SWITCH_STATE: client_data->state = packet->data[1]; break;
                 default:
                     logger_log_level(
-                      LOG_LEVEL_WARNING,
+                      LOG_LEVEL_WARN,
                       "Unknown signal %d on Client %d\n",
                       packet->data[0],
                       packet->client_id);

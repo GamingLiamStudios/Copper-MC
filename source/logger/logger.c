@@ -77,10 +77,10 @@ void logger_log_level(int level, const char *message, ...)
     char *fmt;
     switch (level)
     {
-    case LOG_LEVEL_DEBUG: fmt = "\x1b[0;35m[DEBUG] %s"; break;        // Purple
-    case LOG_LEVEL_INFO: fmt = "\x1b[0;37m[INFO] %s"; break;          // White / Light-Gray
-    case LOG_LEVEL_WARNING: fmt = "\x1b[0;33m[WARNING] %s"; break;    // Yellow
-    case LOG_LEVEL_ERROR: fmt = "\x1b[0;31m[ERROR] %s"; break;        // Red
+    case LOG_LEVEL_DEBUG: fmt = "\x1b[0;35m[DEBUG] %s"; break;    // Purple
+    case LOG_LEVEL_INFO: fmt = "\x1b[0;37m[INFO] %s"; break;      // White / Light-Gray
+    case LOG_LEVEL_WARN: fmt = "\x1b[0;33m[WARN] %s"; break;      // Yellow
+    case LOG_LEVEL_ERROR: fmt = "\x1b[0;31m[ERROR] %s"; break;    // Red
     default: fmt = "[UNKNOWN] %s"; break;
     }
 
