@@ -31,6 +31,7 @@ set(SOURCE_FILES
     source/network/network_manager.c
 
     source/network/packets/packet_builder.c
+    source/network/packets/packet_reader.c
 
     source/util/containers/slotmap.c
     source/util/containers/queue.c
