@@ -1,4 +1,5 @@
 #pragma once
+
 #include <stdlib.h>
 
 #include "util/platform.h"

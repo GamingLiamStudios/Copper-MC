@@ -69,7 +69,7 @@ void packet_builder_write_bytes(struct buffer *buffer, struct buffer *bytes)
 {
     buffer_append(buffer, bytes->data, bytes->size);
 }
-void packet_builder_write_string_ext(struct buffer *buffer, const wchar_t *value, u32 max_len)
+void packet_builder_write_string_ext(struct buffer *buffer, const wchar *value, u32 max_len)
 {
     u32 len = wcslen(value);
     if (len > max_len)
@@ -101,8 +101,8 @@ void packet_builder_write_string_ext(struct buffer *buffer, const wchar_t *value
         else if (chr <= 0x10FFFF)
             b = 3;
 
-        packet_builder_write_ubyte(buffer, (u8) ((0xFE << b) | (chr >> ((6 - b) * 6)))); // B1
-        for (int j = 6 - b; j > 0; j--)
-            packet_builder_write_ubyte(buffer, (u8) (0x80 | ((chr >> (j - 1) * 6) & 0x3F))); // B2-4
+        packet_builder_write_ubyte(buffer, (u8) ((0xFE << b) | (chr >> ((6 - b) * 6))));    // B1
+        for (int j = 6 - b; j > 0; j--)                                                     // B2-4
+            packet_builder_write_ubyte(buffer, (u8) (0x80 | ((chr >> (j - 1) * 6) & 0x3F)));
     }
 }

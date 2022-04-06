@@ -1,5 +1,9 @@
 #include "packet_reader.h"
+
+#include "network/varints.h"
 #include "util/order.h"
+
+#include <string.h>
 
 void packet_reader_init(struct packet_reader *reader, struct packet *packet)
 {
@@ -109,21 +113,21 @@ i32 packet_reader_read_varint(struct packet_reader *reader)
 i64 packet_reader_read_varlong(struct packet_reader *reader)
 {
     i64 v = varlong_decode(reader->buffer->data + reader->offset);
-    reader->offset += varlong_size(v);
+    reader->offset += varint_size(v);
     return v;
 }
-void packet_reader_read_bytes(struct packet_reader *reader, u8 *data, u32 size)
+void packet_reader_read_bytes(struct packet_reader *reader, u8 *data, i32 size)
 {
     memcpy(data, reader->buffer->data + reader->offset, size);
     reader->offset += size;
 }
-const wchar_t *packet_reader_read_string(struct packet_reader *reader)
+const wchar *packet_reader_read_string(struct packet_reader *reader)
 {
     i32 length = packet_reader_read_varint(reader);
     if (length == 0) return L"";
 
     // TODO: Optimize this
-    wchar_t *string = (wchar_t *) malloc(sizeof(wchar_t) * (length + 1));
+    wchar *string = (wchar *) malloc(sizeof(wchar) * (length + 1));
     for (int i = 0; i < length; i++)
     {
         u8 f = packet_reader_read_ubyte(reader);

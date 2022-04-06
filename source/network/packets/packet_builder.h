@@ -1,3 +1,5 @@
+#pragma once
+
 #include "util/containers/buffer.h"
 #include "util/types.h"
 #include "packets.h"
