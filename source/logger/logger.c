@@ -59,6 +59,7 @@ void logger_cleanup()
     queue_destroy(&message_queue);
 }
 
+// TODO: Support some sort of UTF-8 logging
 void logger_log_level(int level, const char *message, ...)
 {
     if (LOG_LEVEL > level) return;

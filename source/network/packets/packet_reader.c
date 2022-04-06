@@ -127,15 +127,15 @@ const wchar_t *packet_reader_read_string(struct packet_reader *reader)
     for (int i = 0; i < length; i++)
     {
         u8 f = packet_reader_read_ubyte(reader);
-        if(!(f & 0x80)
+        if (!(f & 0x80))
         {
             string[i] = f;
             continue;
         }
-        
-        u8 s = 2;
+
+        u8  s    = 2;
         u32 code = f;
-        while((f <<= 1) & 0x80)
+        while ((f <<= 1) & 0x80)
         {
             code <<= 6;
             code |= packet_reader_read_ubyte(reader) & 0x3F;
