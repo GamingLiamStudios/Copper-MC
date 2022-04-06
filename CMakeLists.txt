@@ -30,6 +30,8 @@ set(SOURCE_FILES
     source/network/varints.c
     source/network/network_manager.c
 
+    source/network/packets/packet_builder.c
+
     source/util/containers/slotmap.c
     source/util/containers/queue.c
     source/util/containers/buffer.c

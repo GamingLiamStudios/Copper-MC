@@ -1,6 +1,8 @@
 #pragma once
 #include "util/types.h"
 #include "network/socket.h"
+#include "util/containers/buffer.h"
+#include "packets/packets.h"
 
 /*
 Roles of the Network Manager:
@@ -11,14 +13,5 @@ Roles of the Network Manager:
 - Handle disconnections
 - Process basic packets
 */
-
-struct packet
-{
-    i32 client_id;
-    i32 packet_id;
-
-    i32 size;
-    u8 *data;
-};
 
 void *network_manager_thread(void *args);
