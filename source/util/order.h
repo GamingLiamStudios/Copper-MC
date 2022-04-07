@@ -1,5 +1,7 @@
 #pragma once
 
+#include "types.h"
+
 // This exists cause some compilers do not have a compile-time macro for Endianess -_-
 // This was from 'rapidjson' and was modified for our needs
 #ifndef __BYTE_ORDER__
@@ -33,12 +35,11 @@
 #elif defined(_MSC_VER) && (defined(_M_ARM) || defined(_M_ARM64))
 #define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
 #else
-#include <cstdint>
 static inline bool is_system_little_endian()
 {
-    const int            value { 0x01 };
-    const void          *address                   = (const void *) (&value);
-    const unsigned char *least_significant_address = (const unsigned char *) (address);
+    const int   value { 0x01 };
+    const void *address                   = (const void *) (&value);
+    const u8   *least_significant_address = (const u8 *) (address);
     return (*least_significant_address == 0x01);
 }
 #define __BYTE_ORDER__ (is_system_little_endian() ? __ORDER_LITTLE_ENDIAN__ : __ORDER_BIG_ENDIAN__)
