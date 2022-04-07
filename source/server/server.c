@@ -52,18 +52,15 @@ void server_run()
     // Initialize the network manager
     pthread_create(&network_thread, NULL, network_manager_thread, &packet_queue);
 
-    logger_log("Starting Server!\n");
+    logger_log("Starting Server!");
     while (running)
     {
         struct packet *packet;
         while ((packet = queue_pop(serverbound_packets)))
         {
-            logger_log_level(
-              LOG_LEVEL_DEBUG,
-              "Packet received from client %d\n",
-              packet->client_id);
-            logger_log_level(LOG_LEVEL_DEBUG, "Packet ID: %02hhx\n", packet->packet_id);
-            logger_log_level(LOG_LEVEL_DEBUG, "Packet size: %d\n", packet->size);
+            logger_log_level(LOG_LEVEL_DEBUG, "Packet received from client %d", packet->client_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Packet ID: %02hhx", packet->packet_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Packet size: %d", packet->size);
 
             if (packet->packet_id < 0)
             {
@@ -73,7 +70,7 @@ void server_run()
                 {
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Login Success packet with id %02hhx received\n",
+                      "Login Success packet with id %02hhx received",
                       packet->data[0]);
 
                     struct packet *bounce_packet = malloc(sizeof(struct packet));
@@ -102,7 +99,7 @@ void server_run()
         usleep(1000 / TPS);
     }
 
-    logger_log("Stopping Server\n");
+    logger_log("Stopping Server");
 
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);

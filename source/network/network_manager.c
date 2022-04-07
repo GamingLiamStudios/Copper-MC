@@ -10,6 +10,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <uniconv.h>
+#include <unistdio.h>
 
 #include <zlib-ng.h>
 #include <openssl/md5.h>
@@ -31,6 +33,8 @@
 #include "util/hexdump.h"
 
 #include "varints.h"
+#include "packets/packet_reader.h"
+#include "packets/packet_builder.h"
 
 // Config
 // TODO: Move to runtime config
@@ -72,9 +76,9 @@ struct network_client
 
 struct login_encrypt_temp
 {
-    RSA  *rsa;
-    char *username;
-    u8    verify[4];
+    RSA *rsa;
+    u8  *username;
+    u8   verify[4];
 };
 
 struct encryption_keys
@@ -116,7 +120,7 @@ i32 _network_manager_compress_packet(
           packet_buffer->size);
         if (ret != Z_OK)
         {
-            logger_log_level(LOG_LEVEL_ERROR, "Error %d: Failed to compress packet!\n", ret);
+            logger_log_level(LOG_LEVEL_ERROR, "Error %d: Failed to compress packet!", ret);
             return -1;
         }
 
@@ -270,7 +274,7 @@ void _network_manager_disconnect(
                 if (ret == SOCKET_ERROR) pthread_exit(NULL);
             }
 
-            logger_log_level(LOG_LEVEL_DEBUG, "Client %d disconnected!\n", client_id);
+            logger_log_level(LOG_LEVEL_DEBUG, "Client %d disconnected!", client_id);
         }
         break;
     default: break;
@@ -315,7 +319,7 @@ void _network_manager_cleanup(void *args)
     free(manager->compression_buffer);
     free(manager);
 
-    logger_log("Closing Network Manager\n");
+    logger_log("Closing Network Manager");
 }
 
 size_t _network_manager_curl_read(void *buffer, size_t size, size_t nmemb, void *userp)
@@ -339,10 +343,13 @@ void _network_manager_process_packets(
     struct queue *serverbound_packets = &packet_queues->serverbound;
     struct queue *clientbound_packets = &packet_queues->clientbound;
 
-    struct packet *packet;
+    struct packet       *packet = NULL;
+    struct packet_reader reader = { 0 };
+
     while ((packet = queue_pop(packet_queue)))
     {
         struct network_client *client_data = slotmap_get(clients, packet->client_id);
+        packet_reader_init(&reader, packet);
 
         switch (client_data->state)
         {
@@ -350,21 +357,15 @@ void _network_manager_process_packets(
         {
             if (packet->packet_id > 0x00)
             {
-                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X", packet->packet_id);
                 pthread_exit(NULL);
             }
 
             // Handshake
-            i32 index            = 0;
-            i32 protocol_version = varint_decode(packet->data + index);
-            index += varint_size(protocol_version);
-            i32 hostname_length = varint_decode(packet->data + index);
-            index += varint_size(hostname_length);
-            index += hostname_length;    // Since we have no need for hostname
-            index += 2;                  // Or the port.
-
-            i32 next_state = varint_decode(packet->data + index);
-            index += varint_size(protocol_version);
+            i32       protocol_version = packet_next_varint(&reader);
+            const u8 *hostname         = packet_next_string(&reader);
+            u16       port             = packet_next_ushort(&reader);
+            i32       next_state       = packet_next_varint(&reader);
 
             if (protocol_version == 754)
                 client_data->params |=
@@ -373,7 +374,7 @@ void _network_manager_process_packets(
             client_data->state = next_state;
             logger_log_level(
               LOG_LEVEL_DEBUG,
-              "Handshaken with client %d into state %d\n",
+              "Handshaken with client %d into state %d",
               packet->client_id,
               next_state);
         }
@@ -390,10 +391,11 @@ void _network_manager_process_packets(
                 status_packet->client_id     = packet->client_id;
                 status_packet->packet_id     = 0x00;
 
+                // TODO: Config description + Unicode support
                 const char *status_format =
                   "{\"version\":{\"name\":\"1.16.5\",\"protocol\":754},\"players\":{\"max\":%d,"
-                  "\"online\":%d,\"sample\":[]},\"description\":{\"text\":\"GLS' Copper-MC Testing "
-                  "Server\"}}";
+                  "\"online\":%d,\"sample\":[]},\"description\":{\"text\":\"GLS' Copper-MC "
+                  "Testing Server\"}}";
                 i32 string_length =
                   snprintf(NULL, 0, status_format, MAX_PLAYERS, *connected_players);
 
@@ -435,7 +437,7 @@ void _network_manager_process_packets(
             }
             break;
             default:
-                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X", packet->packet_id);
                 pthread_exit(NULL);
             }
             break;
@@ -451,7 +453,7 @@ void _network_manager_process_packets(
                 {
                     logger_log_level(
                       LOG_LEVEL_INFO,
-                      "Client %d attempted connection with unsupported version\n",
+                      "Client %d attempted connection with unsupported version",
                       packet->client_id);
 
                     // Send disconnect signal
@@ -471,14 +473,11 @@ void _network_manager_process_packets(
                 }
 
                 // Login Start
-                i32   username_length = varint_decode(packet->data);
-                char *username        = malloc(username_length + 1);
-                memcpy(username, packet->data + varint_size(username_length), username_length);
-                username[username_length] = '\0';
+                const u8 *username = packet_next_string(&reader);
 
                 logger_log_level(
                   LOG_LEVEL_DEBUG,
-                  "Client %d logged in as %s\n",
+                  "Client %d logged in as %U",
                   packet->client_id,
                   username);
 
@@ -507,35 +506,28 @@ void _network_manager_process_packets(
                     i2d_RSA_PUBKEY_bio(pub, rsa);
 
                     i32 der_length      = BIO_pending(pub);
-                    client_packet->size = varint_size(0) + varint_size(der_length) + der_length +
-                      5;    // +2 for Server ID, +5 for Verify Token
-                    client_packet->data = malloc(client_packet->size);
-
-                    i32 index = 0;
-
-                    // Server ID
-                    varint_encode(client_packet->data + index, 0);
-                    index += varint_size(0);
-
-                    // Public Key
-                    varint_encode(client_packet->data + index, der_length);
-                    index += varint_size(der_length);
-                    BIO_read(pub, client_packet->data + index, der_length);
-                    index += der_length;
+                    u8 *der_encoded_key = malloc(der_length);
+                    BIO_read(pub, der_encoded_key, der_length);
                     BIO_free_all(pub);
 
-                    // Verify Token
-                    varint_encode(client_packet->data + index, 4);
-                    index += varint_size(4);
-                    client_packet->data[index++] = rand() & 0xFF;
-                    client_packet->data[index++] = rand() & 0xFF;
-                    client_packet->data[index++] = rand() & 0xFF;
-                    client_packet->data[index++] = rand() & 0xFF;
+                    buffer_clear(packet_buffer);
+
+                    packet_write_varint(packet_buffer, 0);    // Server ID
+                    packet_write_varint(packet_buffer, der_length);
+                    packet_write_bytes(packet_buffer, der_encoded_key, der_length);
+                    packet_write_varint(packet_buffer, 4);    // Verify Token Length
+                    packet_write_byte(packet_buffer, rand() & 0xFF);
+                    packet_write_byte(packet_buffer, rand() & 0xFF);
+                    packet_write_byte(packet_buffer, rand() & 0xFF);
+                    packet_write_byte(packet_buffer, rand() & 0xFF);
+
+                    packet_builder_final(packet_buffer, client_packet);
+                    free(der_encoded_key);
 
                     struct login_encrypt_temp *temp = malloc(sizeof(struct login_encrypt_temp));
                     temp->rsa                       = rsa;
-                    temp->username                  = username;
-                    memcpy(temp->verify, client_packet->data + (index - 4), 4);
+                    temp->username                  = (u8 *) username;
+                    memcpy(temp->verify, packet_buffer->data + packet_buffer->size - 4, 4);
                     client_data->cipher_key = temp;
 
                     queue_push(clientbound_packets, client_packet);
@@ -544,13 +536,21 @@ void _network_manager_process_packets(
                 {
                     // Generate Player UUID
                     const char *UUID_hash_format = "OfflinePlayer:";
-                    u8 *UUID_hash_string = malloc(strlen(UUID_hash_format) + strlen(username));
+                    u8         *UUID_hash_string =
+                      malloc(strlen(UUID_hash_format) + strlen((const char *) username));
                     memcpy(UUID_hash_string, UUID_hash_format, strlen(UUID_hash_format));
-                    memcpy(UUID_hash_string + strlen(UUID_hash_format), username, strlen(username));
+                    memcpy(
+                      UUID_hash_string + strlen(UUID_hash_format),
+                      username,
+                      strlen((const char *) username));
 
                     char *UUID = malloc(MD5_DIGEST_LENGTH);
-                    MD5(UUID_hash_string, strlen(UUID_hash_format) + strlen(username), (u8 *) UUID);
+                    MD5(
+                      UUID_hash_string,
+                      strlen(UUID_hash_format) + strlen((const char *) username),
+                      (u8 *) UUID);
                     UUID[6] = (UUID[6] & 0x0f) | 0x30;
+                    free(UUID_hash_string);
 
                     // Set Compression Packet
                     struct packet *client_packet = malloc(sizeof(struct packet));
@@ -574,39 +574,12 @@ void _network_manager_process_packets(
                     client_packet            = malloc(sizeof(struct packet));
                     client_packet->client_id = packet->client_id;
                     client_packet->packet_id = -2;    // Login Success bounce
-                    client_packet->size =
-                      varint_size(strlen(username)) + strlen(username) + varint_size(36) + 36;
-                    client_packet->data = malloc(client_packet->size);
 
-                    varint_encode(client_packet->data, 36);
-                    char *fUUID_string = malloc(37);
-                    snprintf(
-                      fUUID_string,
-                      37,
-                      "%02hhx%02hhx%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx%02hhx-%02hhx"
-                      "%02hhx%02hhx%02hhx%02hhx%02hhx",
-                      UUID[0],
-                      UUID[1],
-                      UUID[2],
-                      UUID[3],
-                      UUID[4],
-                      UUID[5],
-                      UUID[6],
-                      UUID[7],
-                      UUID[8],
-                      UUID[9],
-                      UUID[10],
-                      UUID[11],
-                      UUID[12],
-                      UUID[13],
-                      UUID[14],
-                      UUID[15]);
-                    memcpy(client_packet->data + 1, fUUID_string, 36);
-                    memcpy(
-                      client_packet->data + 37,
-                      packet->data,
-                      packet->size);    // Save some work by reusing the Login Start packet
-                    free(fUUID_string);
+                    buffer_clear(packet_buffer);
+                    packet_write_uuid(packet_buffer, (u8 *) UUID);
+                    packet_write_string(packet_buffer, username);
+                    packet_builder_final(packet_buffer, client_packet);
+                    free(UUID);
 
                     // Server will bounce this back to client
                     queue_push(serverbound_packets, client_packet);
@@ -622,15 +595,15 @@ void _network_manager_process_packets(
                     queue_push(clientbound_packets, client_packet);
 
                     (*connected_players)++;
-                    logger_log("%s has joined the Server.\n", username);
-                    free(username);
+                    logger_log("%U has joined the Server.", username);
+                    free((u8 *) username);
                 }
             }
             break;
             case 0x01:
             {
                 struct login_encrypt_temp *temp     = client_data->cipher_key;
-                char                      *username = temp->username;
+                u8                        *username = temp->username;
 
                 // Encryption Response
                 i32 enc_secret_length = varint_decode(packet->data);
@@ -658,12 +631,12 @@ void _network_manager_process_packets(
                 {
                     logger_log_level(
                       LOG_LEVEL_WARN,
-                      "Client %d[%s] failed to authenticate\n",
+                      "Client %d[%U] failed to authenticate",
                       packet->client_id,
                       username);
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Reason[%d]: verify mismatch.\n",
+                      "Reason[%d]: verify mismatch.",
                       packet->client_id);
                     free(secret);
                     free(verify);
@@ -755,13 +728,15 @@ void _network_manager_process_packets(
                 curl_url_set(url, CURLUPART_HOST, "sessionserver.mojang.com", 0);
                 curl_url_set(url, CURLUPART_PATH, "/session/minecraft/hasJoined", 0);
 
-                char *temp_string = malloc(strlen("username=") + strlen(temp->username) + 1);
-                sprintf(temp_string, "username=%s", temp->username);
-                curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
+                u8   *temp_string = NULL;
+                char *temp_ascii  = NULL;
+                u8_asprintf(&temp_string, "username=%U", temp->username);
+                temp_ascii = u8_strconv_to_locale(temp_string);
+                curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
                 // FIXME: Can cause memory leak & some other bad shit if realloc fails
-                temp_string = realloc(temp_string, strlen("serverId=") + strlen(hash_string) + 1);
-                sprintf(temp_string, "serverId=%s", hash_string);
-                curl_url_set(url, CURLUPART_QUERY, temp_string, CURLU_APPENDQUERY);
+                temp_ascii = realloc(temp_ascii, strlen("serverId=") + strlen(hash_string) + 1);
+                printf(temp_ascii, "serverId=%s", hash_string);
+                curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
                 free(temp_string);
 
                 CURL *curl = curl_easy_init();
@@ -775,12 +750,12 @@ void _network_manager_process_packets(
                 {
                     logger_log_level(
                       LOG_LEVEL_WARN,
-                      "Client %d[%s] failed to authenticate\n",
+                      "Client %d[%U] failed to authenticate",
                       packet->client_id,
                       username);
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Reason[%d]: curl_easy_perform() failed: %s\n",
+                      "Reason[%d]: curl_easy_perform() failed: %ls",
                       packet->client_id,
                       curl_easy_strerror(res));
                     free(temp->username);
@@ -814,12 +789,12 @@ void _network_manager_process_packets(
                 {
                     logger_log_level(
                       LOG_LEVEL_WARN,
-                      "Client %d[%s] failed to authenticate\n",
+                      "Client %d[%U] failed to authenticate",
                       packet->client_id,
                       username);
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Reason[%d]: Failed to parse JSON\n",
+                      "Reason[%d]: Failed to parse JSON",
                       packet->client_id);
 
                     // Send disconnect signal
@@ -843,12 +818,12 @@ void _network_manager_process_packets(
                 {
                     logger_log_level(
                       LOG_LEVEL_WARN,
-                      "Client %d[%s] failed to authenticate\n",
+                      "Client %d[%U] failed to authenticate",
                       packet->client_id,
                       username);
                     logger_log_level(
                       LOG_LEVEL_DEBUG,
-                      "Reason[%d]: Failed to parse JSON\n",
+                      "Reason[%d]: Failed to parse JSON",
                       packet->client_id);
                     json_object_put(root);
 
@@ -892,27 +867,23 @@ void _network_manager_process_packets(
                 client_packet            = malloc(sizeof(struct packet));
                 client_packet->client_id = packet->client_id;
                 client_packet->packet_id = -2;    // Login Success bounce
-                client_packet->size      = 1 + varint_size(strlen(json_username)) +
-                  strlen(json_username) + varint_size(36) + 36;
-                client_packet->data = malloc(client_packet->size);
 
-                client_packet->data[0] = 0x02;
-                varint_encode(client_packet->data + 1, 36);
-                memset(client_packet->data + varint_size(36) + 1, '-', 36);
-                memcpy(client_packet->data + varint_size(36) + 1, json_uuid, 8);
-                memcpy(client_packet->data + varint_size(36) + 10, json_uuid + 8, 4);
-                memcpy(client_packet->data + varint_size(36) + 15, json_uuid + 12, 4);
-                memcpy(client_packet->data + varint_size(36) + 20, json_uuid + 16, 4);
-                memcpy(client_packet->data + varint_size(36) + 25, json_uuid + 20, 12);
-                varint_encode(client_packet->data + varint_size(36) + 37, strlen(json_username));
-                memcpy(
-                  client_packet->data + varint_size(36) + 37 + varint_size(strlen(json_username)),
-                  json_username,
-                  strlen(json_username));
+                // Convert json_uuid back to binary
+                u8 *UUID = malloc(32);
+                BN_hex2bn(&bn, json_uuid);
+                BN_bn2bin(bn, UUID);
+                BN_free(bn);
+
+                buffer_clear(packet_buffer);
+                packet_write_uuid(packet_buffer, UUID);
+                packet_write_string(packet_buffer, (u8 *) json_username);
+
+                packet_builder_final(packet_buffer, client_packet);
+                free(UUID);
+                json_object_put(root);
 
                 // Server will bounce this back to client
                 queue_push(serverbound_packets, client_packet);
-                json_object_put(root);
 
                 // Update Client State
                 client_packet            = malloc(sizeof(struct packet));
@@ -925,12 +896,12 @@ void _network_manager_process_packets(
                 queue_push(clientbound_packets, client_packet);
 
                 (*connected_players)++;
-                logger_log("%s has joined the Server.\n", username);
+                logger_log("%U has joined the Server.", username);
                 free(username);
             }
             break;
             default:
-                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X\n", packet->packet_id);
+                logger_log_level(LOG_LEVEL_ERROR, "Unknown Packet! ID: %2X", packet->packet_id);
                 pthread_exit(NULL);
             }
         }
@@ -943,7 +914,7 @@ void _network_manager_process_packets(
         }
         break;
         default:
-            logger_log_level(LOG_LEVEL_ERROR, "Unknown Client State! %d\n", client_data->state);
+            logger_log_level(LOG_LEVEL_ERROR, "Unknown Client State! %d", client_data->state);
             pthread_exit(NULL);
         }
 
@@ -1023,7 +994,7 @@ void *network_manager_thread(void *args)
             client_data->params                = 0;
             client_data->cipher_key            = NULL;
             i32 key                            = slotmap_insert(clients, client_data);
-            logger_log_level(LOG_LEVEL_DEBUG, "Accepted new client %d\n", key);
+            logger_log_level(LOG_LEVEL_DEBUG, "Accepted new client %d", key);
         }
 
         // Next, let's fetch all the packets from the clients
@@ -1084,7 +1055,7 @@ void *network_manager_thread(void *args)
 
                 logger_log_level(
                   LOG_LEVEL_DEBUG,
-                  "Got packet of size %d from Client %d\n",
+                  "Got packet of size %d from Client %d",
                   packet_length,
                   itt->key);
 
@@ -1160,7 +1131,7 @@ void *network_manager_thread(void *args)
                         {
                             logger_log_level(
                               LOG_LEVEL_DEBUG,
-                              "Client %d failed to decompress packet. Error %d\n",
+                              "Client %d failed to decompress packet. Error %d",
                               packet->client_id,
                               ret);
 
@@ -1226,7 +1197,7 @@ void *network_manager_thread(void *args)
             {
                 logger_log_level(
                   LOG_LEVEL_DEBUG,
-                  "Client %d is no longer connected!\n",
+                  "Client %d is no longer connected!",
                   packet->client_id);
                 slotmap_remove(clients, packet->client_id);
                 _network_manager_destroy_client(client_data);
@@ -1254,7 +1225,7 @@ void *network_manager_thread(void *args)
                 default:
                     logger_log_level(
                       LOG_LEVEL_WARN,
-                      "Unknown signal %d on Client %d\n",
+                      "Unknown signal %d on Client %d",
                       packet->data[0],
                       packet->client_id);
                 }

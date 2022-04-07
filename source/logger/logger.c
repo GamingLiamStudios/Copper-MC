@@ -6,6 +6,8 @@
 #include <stdarg.h>
 
 #include <unistd.h>
+#include <unistdio.h>
+#include <uniconv.h>
 
 #include <pthread.h>
 #include "util/containers/queue.h"
@@ -17,7 +19,7 @@ struct queue message_queue;
 pthread_t       thread;
 pthread_cond_t  cv;
 pthread_mutex_t mutex;
-int             logger_running;
+bool            logger_running;
 
 void *logger_thread(void *args)
 {
@@ -45,55 +47,51 @@ void logger_init()
     queue_init(&message_queue);
     pthread_cond_init(&cv, NULL);
     pthread_mutex_init(&mutex, NULL);
-    logger_running = 1;
+    logger_running = true;
 
     pthread_create(&thread, NULL, logger_thread, NULL);
 }
 void logger_cleanup()
 {
     pthread_mutex_lock(&mutex);
-    logger_running = 0;
+    logger_running = false;
     pthread_cond_signal(&cv);
     pthread_mutex_unlock(&mutex);
     pthread_join(thread, NULL);
     queue_destroy(&message_queue);
 }
 
-// TODO: Support some sort of UTF-8 logging
 void logger_log_level(int level, const char *message, ...)
 {
     if (LOG_LEVEL > level) return;
 
     // TODO: Make sure this is cross-platform
+    u8 *msg = NULL, *msg_fmt = NULL;
+
     va_list args;
     va_start(args, message);
-    int msg_len = vsnprintf(NULL, 0, message, args);
-    va_end(args);
-
-    va_start(args, message);
-    char *msg = malloc(msg_len + 1);
-    int   i   = vsnprintf(msg, msg_len + 1, message, args);
+    int msg_len = u8_vasprintf(&msg, message, args);
     va_end(args);
 
     char *fmt;
     switch (level)
     {
-    case LOG_LEVEL_DEBUG: fmt = "\x1b[0;35m[DEBUG] %s"; break;    // Purple
-    case LOG_LEVEL_INFO: fmt = "\x1b[0;37m[INFO] %s"; break;      // White / Light-Gray
-    case LOG_LEVEL_WARN: fmt = "\x1b[0;33m[WARN] %s"; break;      // Yellow
-    case LOG_LEVEL_ERROR: fmt = "\x1b[0;31m[ERROR] %s"; break;    // Red
-    default: fmt = "[UNKNOWN] %s"; break;
+    case LOG_LEVEL_DEBUG: fmt = "\x1b[0;35m[DEBUG] %U"; break;    // Purple
+    case LOG_LEVEL_INFO: fmt = "\x1b[0;37m[INFO] %U"; break;      // White / Light-Gray
+    case LOG_LEVEL_WARN: fmt = "\x1b[0;33m[WARN] %U"; break;      // Yellow
+    case LOG_LEVEL_ERROR: fmt = "\x1b[0;31m[ERROR] %U"; break;    // Red
+    default: fmt = "[UNKNOWN] %U"; break;
     }
 
-    if (msg[msg_len - 1] == '\n') msg[msg_len - 1] = '\0';
+    // if (msg[msg_len - 1] == L'\n') msg[msg_len - 1] = L'\0'; // TODO: Reimplement this
 
-    int   msg_fmt_len = snprintf(NULL, 0, fmt, msg);
-    char *msg_fmt     = malloc(msg_fmt_len + 1);
-    snprintf(msg_fmt, msg_fmt_len + 1, fmt, msg);
+    u8_asprintf(&msg_fmt, fmt, msg);
+    char *msg_locale = u8_strconv_to_locale(msg_fmt);
     free(msg);
+    free(msg_fmt);
 
     pthread_mutex_lock(&mutex);
-    queue_push(&message_queue, msg_fmt);
+    queue_push(&message_queue, msg_locale);
     pthread_cond_signal(&cv);
     pthread_mutex_unlock(&mutex);
 }

@@ -7,29 +7,29 @@
 
 void packet_reader_init(struct packet_reader *reader, struct packet *packet)
 {
-    buffer_init(reader->buffer, packet->size);
+    if (!reader->buffer)
+    {
+        reader->buffer = malloc(sizeof(struct buffer));
+        buffer_init(reader->buffer, packet->size);
+    }
+    buffer_clear(reader->buffer);
     buffer_append(reader->buffer, packet->data, packet->size);
     reader->offset = 0;
 }
 void packet_reader_destroy(struct packet_reader *reader)
 {
     buffer_destroy(reader->buffer);
-}
-void packet_reader_reuse(struct packet_reader *reader, struct packet *packet)
-{
-    buffer_clear(reader->buffer);
-    buffer_append(reader->buffer, packet->data, packet->size);
-    reader->offset = 0;
+    free(reader->buffer);
 }
 
 // Basic Types
-u8 packet_reader_read_ubyte(struct packet_reader *reader)
+u8 packet_next_ubyte(struct packet_reader *reader)
 {
     u8 data = reader->buffer->data[reader->offset];
     reader->offset += sizeof(u8);
     return data;
 }
-u16 packet_reader_read_ushort(struct packet_reader *reader)
+u16 packet_next_ushort(struct packet_reader *reader)
 {
     union
     {
@@ -41,7 +41,7 @@ u16 packet_reader_read_ushort(struct packet_reader *reader)
     reader->offset += sizeof(u16);
     return u.data;
 }
-i32 packet_reader_read_int(struct packet_reader *reader)
+i32 packet_next_int(struct packet_reader *reader)
 {
     // TODO: check if this actually benifits anyone
     union
@@ -65,7 +65,7 @@ i32 packet_reader_read_int(struct packet_reader *reader)
     reader->offset += sizeof(i32);
     return u.data;
 }
-i64 packet_reader_read_long(struct packet_reader *reader)
+i64 packet_next_long(struct packet_reader *reader)
 {
     union
     {
@@ -92,61 +92,41 @@ i64 packet_reader_read_long(struct packet_reader *reader)
     reader->offset += sizeof(i64);
     return u.data;
 }
-f32 packet_reader_read_float(struct packet_reader *reader)
+f32 packet_next_float(struct packet_reader *reader)
 {
-    i32 t = packet_reader_read_int(reader);
+    i32 t = packet_next_int(reader);
     return *(f32 *) &t;
 }
-f64 packet_reader_read_double(struct packet_reader *reader)
+f64 packet_next_double(struct packet_reader *reader)
 {
-    i64 t = packet_reader_read_long(reader);
+    i64 t = packet_next_long(reader);
     return *(f64 *) &t;
 }
 
 // Complex Types
-i32 packet_reader_read_varint(struct packet_reader *reader)
+i32 packet_next_varint(struct packet_reader *reader)
 {
     i32 v = varint_decode(reader->buffer->data + reader->offset);
     reader->offset += varint_size(v);
     return v;
 }
-i64 packet_reader_read_varlong(struct packet_reader *reader)
+i64 packet_next_varlong(struct packet_reader *reader)
 {
     i64 v = varlong_decode(reader->buffer->data + reader->offset);
     reader->offset += varint_size(v);
     return v;
 }
-void packet_reader_read_bytes(struct packet_reader *reader, u8 *data, i32 size)
+void packet_next_bytes(struct packet_reader *reader, u8 *data, i32 size)
 {
     memcpy(data, reader->buffer->data + reader->offset, size);
     reader->offset += size;
 }
-const wchar *packet_reader_read_string(struct packet_reader *reader)
+const u8 *packet_next_string(struct packet_reader *reader)
 {
-    i32 length = packet_reader_read_varint(reader);
-    if (length == 0) return L"";
+    i32 length = packet_next_varint(reader);
 
-    // TODO: Optimize this
-    wchar *string = (wchar *) malloc(sizeof(wchar) * (length + 1));
-    for (int i = 0; i < length; i++)
-    {
-        u8 f = packet_reader_read_ubyte(reader);
-        if (!(f & 0x80))
-        {
-            string[i] = f;
-            continue;
-        }
-
-        u8  s    = 2;
-        u32 code = f;
-        while ((f <<= 1) & 0x80)
-        {
-            code <<= 6;
-            code |= packet_reader_read_ubyte(reader) & 0x3F;
-            s++;
-        }
-        code &= 0xFFFFFFFF >> (32 - ((s - 2) * 6 + (8 - s)));
-    }
+    u8 *string = (u8 *) malloc(length + 1);
+    packet_next_bytes(reader, string, length);
 
     string[length] = L'\0';
     return string;

@@ -17,4 +17,4 @@ typedef int64_t i64;
 typedef float  f32;
 typedef double f64;
 
-typedef wchar_t wchar;
+/// typedef wchar_t wchar;

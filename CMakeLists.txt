@@ -48,4 +48,5 @@ set_target_properties(main-executable PROPERTIES OUTPUT_NAME "Copper-MC")
 target_include_directories(main-executable PUBLIC "extern")
 target_include_directories(main-executable PRIVATE "source") # to allow paths relative to project root
 
-target_link_libraries(main-executable PRIVATE m Threads::Threads zlib OpenSSL::Crypto curl json-c::json-c)
+# TODO: Check if unistring is Windows compatible, or at least MSYS compatible
+target_link_libraries(main-executable PRIVATE m unistring Threads::Threads zlib OpenSSL::Crypto curl json-c::json-c)
