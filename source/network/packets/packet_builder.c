@@ -9,7 +9,7 @@
 void packet_builder_final(struct buffer *buffer, struct packet *packet)
 {
     packet->size = buffer_size(buffer);
-    if (packet->data == NULL) packet->data = malloc(packet->size);
+    packet->data = malloc(packet->size);
     memcpy(packet->data, buffer->data, packet->size);
 }
 

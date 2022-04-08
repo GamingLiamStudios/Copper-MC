@@ -158,13 +158,17 @@ void _network_manager_destroy_client(struct network_client *client)
             // FIXME: Figure out why these segfault
             if (ctx->enc)
             {
-                EVP_EncryptFinal(ctx->enc, NULL, NULL);
+                u8  tmp[1];
+                int len = 1;
+                EVP_EncryptFinal_ex(ctx->enc, tmp, &len);
                 EVP_CIPHER_CTX_free(ctx->enc);
                 ctx->enc = NULL;
             }
             if (ctx->dec)
             {
-                EVP_DecryptFinal(ctx->dec, NULL, NULL);
+                u8  tmp[1];
+                int len = 1;
+                EVP_DecryptFinal_ex(ctx->dec, tmp, &len);
                 EVP_CIPHER_CTX_free(ctx->dec);
                 ctx->dec = NULL;
             }
@@ -477,7 +481,7 @@ void _network_manager_process_packets(
 
                 getpeername(client_data->socket, (struct sockaddr *) &rem_addr, &len);
                 getsockname(client_data->socket, (struct sockaddr *) &loc_addr, &len);
-                if (ONLINE_MODE && rem_addr.sin_addr.s_addr != loc_addr.sin_addr.s_addr)
+                if (ONLINE_MODE /* && rem_addr.sin_addr.s_addr != loc_addr.sin_addr.s_addr */)
                 {
                     // Generate RSA Keypair
                     RSA    *rsa = RSA_new();
@@ -594,6 +598,7 @@ void _network_manager_process_packets(
             {
                 struct login_encrypt_temp *temp     = client_data->cipher_key;
                 u8                        *username = temp->username;
+                client_data->cipher_key             = NULL;
 
                 // Encryption Response
                 i32 enc_secret_length = varint_decode(packet->data);
@@ -692,9 +697,8 @@ void _network_manager_process_packets(
                 while (strlen(hex) && hex[0] == '0') memmove(hex, hex + 1, strlen(hex));
 
                 // FIXME: Can cause memory leak & some other bad shit if realloc fails
-                hash_string = realloc(hash_string, strlen(hex) + strlen(hash_string) + 1);
-                memcpy(hash_string + strlen(hash_string), hex, strlen(hex));
-                hash_string[strlen(hash_string)] = '\0';
+                hash_string = realloc(hash_string, strlen(hash_string) + strlen(hex) + 1);
+                strcat(hash_string, hex);
                 for (int i = 0; i < strlen(hash_string); i++)
                     hash_string[i] = tolower(hash_string[i]);
 
@@ -720,16 +724,12 @@ void _network_manager_process_packets(
                 curl_url_set(url, CURLUPART_HOST, "sessionserver.mojang.com", 0);
                 curl_url_set(url, CURLUPART_PATH, "/session/minecraft/hasJoined", 0);
 
-                u8   *temp_string = NULL;
-                char *temp_ascii  = NULL;
-                u8_asprintf(&temp_string, "username=%U", temp->username);
-                temp_ascii = u8_strconv_to_locale(temp_string);
-                curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
-                // FIXME: Can cause memory leak & some other bad shit if realloc fails
-                temp_ascii = realloc(temp_ascii, strlen("serverId=") + strlen(hash_string) + 1);
-                sprintf(&temp_ascii, "serverId=%s", hash_string);
+                u8 *temp_string = NULL;
+                u8_asprintf(&temp_string, "username=%U&serverId=%s", temp->username, hash_string);
+                char *temp_ascii = u8_strconv_to_locale(temp_string);
                 curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
                 free(temp_string);
+                free(temp_ascii);
 
                 CURL *curl = curl_easy_init();
                 curl_easy_setopt(curl, CURLOPT_CURLU, url);
@@ -858,6 +858,7 @@ void _network_manager_process_packets(
                 client_packet->packet_id = -2;    // Login Success bounce
 
                 // Convert json_uuid back to binary
+                bn       = NULL;
                 u8 *UUID = malloc(32);
                 BN_hex2bn(&bn, json_uuid);
                 BN_bn2bin(bn, UUID);
