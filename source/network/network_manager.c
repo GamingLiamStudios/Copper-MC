@@ -155,7 +155,6 @@ void _network_manager_destroy_client(struct network_client *client)
         {
             struct encryption_keys *ctx = client->cipher_key;
 
-            // FIXME: Figure out why these segfault
             if (ctx->enc)
             {
                 u8  tmp[1];
