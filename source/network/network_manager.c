@@ -290,8 +290,7 @@ void _network_manager_cleanup(void *args)
 
     const char *disconnect_message = "{\"text\":\"Server shutting down\"}";
     buffer_clear(manager->packet_buffer);
-    buffer_append_u8(manager->packet_buffer, strlen(disconnect_message));
-    buffer_append(manager->packet_buffer, disconnect_message, strlen(disconnect_message));
+    packet_write_string(manager->packet_buffer, (u8 *) disconnect_message);
     for (const struct slotmap_entry *itt = slotmap_end(manager->clients) - 1;
          itt >= slotmap_begin(manager->clients);
          itt--)
@@ -458,11 +457,10 @@ void _network_manager_process_packets(
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
-                    buffer_append(
+                    packet_write_string(
                       packet_buffer,
-                      "{\"text\":\"Attempted connection with unsupported version. Please try again "
-                      "with version 1.16.5\"}",
-                      94);
+                      (u8 *) ("{\"text\":\"Attempted connection with unsupported version. Please "
+                              "try again with version 1.16.5\"}"));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
@@ -647,7 +645,9 @@ void _network_manager_process_packets(
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
-                    buffer_append(packet_buffer, "{\"text\":\"Failed to verify client.\"}", 35);
+                    packet_write_string(
+                      packet_buffer,
+                      (u8 *) ("{\"text\":\"Failed to verify client.\"}"));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
@@ -735,7 +735,7 @@ void _network_manager_process_packets(
                 curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
                 // FIXME: Can cause memory leak & some other bad shit if realloc fails
                 temp_ascii = realloc(temp_ascii, strlen("serverId=") + strlen(hash_string) + 1);
-                printf(temp_ascii, "serverId=%s", hash_string);
+                sprintf(&temp_ascii, "serverId=%s", hash_string);
                 curl_url_set(url, CURLUPART_QUERY, temp_ascii, CURLU_APPENDQUERY);
                 free(temp_string);
 
@@ -764,10 +764,9 @@ void _network_manager_process_packets(
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
-                    buffer_append(
+                    packet_write_string(
                       packet_buffer,
-                      "{\"text\":\"Failed to Authenticate with Mojang Servers.\"}",
-                      54);
+                      (u8 *) ("{\"text\":\"Failed to Authenticate with Mojang Servers.\"}"));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
@@ -799,10 +798,9 @@ void _network_manager_process_packets(
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
-                    buffer_append(
+                    packet_write_string(
                       packet_buffer,
-                      "{\"text\":\"Failed to Authenticate with Mojang Servers.\"}",
-                      54);
+                      (u8 *) ("{\"text\":\"Failed to Authenticate with Mojang Servers.\"}"));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
@@ -829,10 +827,9 @@ void _network_manager_process_packets(
 
                     // Send disconnect signal
                     buffer_clear(packet_buffer);
-                    buffer_append(
+                    packet_write_string(
                       packet_buffer,
-                      "{\"text\":\"Failed to Authenticate with Mojang Servers.\"}",
-                      54);
+                      (u8 *) ("{\"text\":\"Failed to Authenticate with Mojang Servers.\"}"));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
@@ -1136,10 +1133,9 @@ void *network_manager_thread(void *args)
                               ret);
 
                             buffer_clear(packet_buffer);
-                            buffer_append(
+                            packet_write_string(
                               packet_buffer,
-                              "{\"text\":\"Decompression failed.\"}",
-                              32);
+                              (u8 *) ("{\"text\":\"Decompression failed.\"}"));
                             _network_manager_disconnect(
                               clients,
                               packet_buffer,
@@ -1240,6 +1236,7 @@ void *network_manager_thread(void *args)
                 if (_network_manager_compress_packet(packet_buffer, compression_buffer, packet) < 0)
                 {
                     buffer_clear(packet_buffer);
+                    packet_write_string(packet_buffer, (u8 *) ());
                     buffer_append(packet_buffer, "{\"text\":\"Compression failed.\"", 29);
                     _network_manager_disconnect(
                       clients,
