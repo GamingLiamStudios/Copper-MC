@@ -133,18 +133,14 @@ i32 _network_manager_compress_packet(
 
     // Now, let's write the packet to the client
     buffer_clear(packet_buffer);
-    varint_encode(
-      packet_buffer->data,
+    packet_write_varint(
+      packet_buffer,
       varint_size(data_length) + compression_buffer->size);    // Packet Length
-    index += varint_size(varint_size(data_length) + data_length);
-    buffer_reserve(packet_buffer, index + varint_size(data_length) + data_length);
-    varint_encode(packet_buffer->data + index, data_length);    // Data Length
-    index += varint_size(data_length);
-    memcpy(    // Compressed Data(Packet ID + Data)
-      packet_buffer->data + index,
+    packet_write_varint(packet_buffer, data_length);           // Data Length
+    packet_write_bytes(
+      packet_buffer,
       compression_buffer->data,
-      compression_buffer->size);
-    packet_buffer->size = index + compression_buffer->size;
+      compression_buffer->size);    // Compressed Data(Packet ID + Data)
 
     return 0;
 }
@@ -243,13 +239,9 @@ void _network_manager_disconnect(
             }
             else
             {
-                varint_encode(packet_buffer->data, packet.size + 1);    // Packet Length
-                index += varint_size(packet.size + 1);
-                buffer_reserve(packet_buffer, index + 1 + packet.size);
-                packet_buffer->data[index++] = packet.packet_id;    // Packet ID
-                memcpy(packet_buffer->data + index, packet.data,
-                       packet.size);    // Packet Data
-                packet_buffer->size = index + packet.size;
+                packet_write_varint(packet_buffer, packet.size);
+                packet_write_varint(packet_buffer, packet.packet_id);
+                packet_write_bytes(packet_buffer, packet.data, packet.size);
             }
 
             if (client->params & CLIENTPARAMS_ENCRYPTED)
@@ -1236,8 +1228,9 @@ void *network_manager_thread(void *args)
                 if (_network_manager_compress_packet(packet_buffer, compression_buffer, packet) < 0)
                 {
                     buffer_clear(packet_buffer);
-                    packet_write_string(packet_buffer, (u8 *) ());
-                    buffer_append(packet_buffer, "{\"text\":\"Compression failed.\"", 29);
+                    packet_write_string(
+                      packet_buffer,
+                      (u8 *) ("{\"text\":\"Compression failed.\""));
                     _network_manager_disconnect(
                       clients,
                       packet_buffer,
